@@ -288,3 +288,31 @@ def test_dropdown_items_reads_the_documented_response():
         items = metadata_client().dropdown_items("1I00K3A4X4T2UWD3COJ3FU0KMKYXZL9WEEFK")
         assert items["1I00AABNSR5CLLWSP3IK3IVPS8983FQVHJ2H"] == "Viewer"
         assert len(items) == 5
+
+
+class SpinGuard(RuntimeError):
+    pass
+
+
+def test_rate_limiter_makes_progress_when_float_rounding_leaves_a_sliver():
+    """CI hung here. From a clock start of 73.991..., after sleeping the
+    computed delay the oldest send is 59.999999999999986 seconds old, a hair
+    under the period. The old loop then slept 1.4e-14 seconds, which cannot
+    move a float clock near 134, and spun forever. The fake clock starts at
+    the machine's uptime, so only a freshly booted CI runner hit it.
+    """
+    now = [73.99103330961584]
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) > 1000:
+            raise SpinGuard("the limiter is spinning without progress")
+        now[0] += seconds
+
+    limiter = RateLimiter(calls=30, period=60, clock=lambda: now[0], sleep=sleep)
+    for _ in range(80):
+        limiter.acquire()
+    # 80 calls at 30 a minute: the 31st and 61st calls each wait a window.
+    assert len(sleeps) == 2
+    assert all(seconds == pytest.approx(60) for seconds in sleeps)

@@ -142,6 +142,14 @@ class RateLimiter:
                 delay = self.period - (now - self._sent[0])
                 self._sleep(delay)
                 waited += delay
+                # The oldest send, and any sent at the same moment, are now a
+                # full period old, so drop them here. Comparing clock values
+                # again can loop forever: float rounding can leave them a hair
+                # under the period, and a sleep of that hair may not move the
+                # clock at all.
+                oldest = self._sent[0]
+                while self._sent and self._sent[0] <= oldest:
+                    self._sent.popleft()
 
 
 _LABEL = r"[a-z0-9-]+"

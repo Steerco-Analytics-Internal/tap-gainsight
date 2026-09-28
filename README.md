@@ -405,7 +405,9 @@ poetry run tap-gainsight --config config.json --catalog catalog.json --state sta
 poetry run pytest
 ```
 
-`pytest` reports coverage for `tap_gainsight/` and fails under 90%.
+`pytest` reports coverage for `tap_gainsight/` and fails under 90%. Each
+test has a 60-second timeout (`pytest-timeout`), so a hang fails fast with a
+traceback of every thread instead of stalling CI.
 
 ### Test fixtures
 

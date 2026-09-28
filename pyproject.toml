@@ -17,6 +17,7 @@ tzdata = ">=2023.3"
 pytest = "^6.2.5"
 requests-mock = "^1.11.0"
 pytest-cov = "^4.1.0"
+pytest-timeout = "^2.2.0"
 black = "^21.9b0"
 flake8 = "^3.9.2"
 isort = "^5.10.1"
@@ -30,6 +31,9 @@ src_paths = "tap_gainsight"
 
 [tool.pytest.ini_options]
 addopts = "--cov=tap_gainsight --cov-report=term-missing --cov-fail-under=90"
+# A hang fails the test after 60 seconds, with a traceback of every thread.
+timeout = 60
+timeout_method = "thread"
 filterwarnings = ["ignore::DeprecationWarning"]
 
 [build-system]
