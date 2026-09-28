@@ -5,6 +5,7 @@ from __future__ import annotations
 import typing as t
 
 from singer_sdk import Stream, Tap
+from singer_sdk.exceptions import ConfigValidationError
 from singer_sdk import typing as th
 
 from tap_gainsight.client import (
@@ -12,6 +13,7 @@ from tap_gainsight.client import (
     GainsightAuthError,
     GainsightMetadataClient,
     RateLimiter,
+    load_zone,
 )
 from tap_gainsight.streams import (
     CtaDeletedStream,
@@ -80,6 +82,15 @@ class TapGainsight(Tap):
             description="Earliest modified date to sync for incremental streams.",
         ),
         th.Property(
+            "filter_timezone",
+            th.StringType,
+            description=(
+                "Optional IANA time zone name, such as America/Los_Angeles. "
+                "Set it when the tenant reads query filter times in its local "
+                "time zone. Unset means UTC."
+            ),
+        ),
+        th.Property(
             "objects",
             th.ArrayType(th.StringType),
             description=(
@@ -94,6 +105,20 @@ class TapGainsight(Tap):
     _failed_objects: t.Set[str] = set()
     _failed_dropdowns: t.Set[str] = set()
     _stream_objects: t.Dict[str, str] = {}
+
+    def _validate_config(
+        self, *, raise_errors: bool = True, warnings_as_errors: bool = False
+    ) -> t.Tuple[t.List[str], t.List[str]]:
+        warnings, errors = super()._validate_config(
+            raise_errors=raise_errors, warnings_as_errors=warnings_as_errors
+        )
+        try:
+            load_zone(self.config.get("filter_timezone"))
+        except ValueError as exc:
+            if raise_errors:
+                raise ConfigValidationError(f"Config validation failed: {exc}") from exc
+            errors.append(str(exc))
+        return warnings, errors
 
     @property
     def rate_limiter(self) -> RateLimiter:

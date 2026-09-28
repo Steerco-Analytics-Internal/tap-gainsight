@@ -23,6 +23,11 @@ from urllib.parse import urlparse
 
 import backoff
 import requests
+
+try:
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+except ImportError:  # Python before 3.9.
+    from backports.zoneinfo import ZoneInfo, ZoneInfoNotFoundError  # type: ignore
 from singer_sdk import metrics
 from singer_sdk.exceptions import FatalAPIError
 from singer_sdk.streams import RESTStream
@@ -317,13 +322,33 @@ def as_utc(value: datetime.datetime) -> datetime.datetime:
     return plain.astimezone(datetime.timezone.utc)
 
 
-def format_query_datetime(value: datetime.datetime) -> str:
+def load_zone(name: t.Optional[str]) -> t.Optional[datetime.tzinfo]:
+    """Return the IANA zone `name`, or None for UTC. Raises ValueError."""
+    if not name:
+        return None
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValueError(
+            f"Unknown filter_timezone {name!r}. Use an IANA name, such as "
+            "America/Los_Angeles."
+        ) from exc
+
+
+def format_query_datetime(
+    value: datetime.datetime, zone: t.Optional[datetime.tzinfo] = None
+) -> str:
     """Format a DATETIME filter value for the query API.
 
-    Uses `yyyy-MM-dd HH:mm:ss` in UTC, the form in the delete log sample
-    request: `"value": ["2024-02-05 00:00:00"]`.
+    Uses `yyyy-MM-dd HH:mm:ss`, the form in the delete log sample request:
+    `"value": ["2024-02-05 00:00:00"]`. The value is in UTC, or in `zone`
+    when the `filter_timezone` setting names one. The zone's rules apply,
+    so daylight saving time is handled.
     """
-    return as_utc(value).strftime("%Y-%m-%d %H:%M:%S")
+    moment = as_utc(value)
+    if zone is not None:
+        moment = moment.astimezone(zone)
+    return moment.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def json_schema_for(data_type: t.Optional[str]) -> dict:
@@ -652,6 +677,10 @@ class GainsightStream(RESTStream):
         self.update_sync_costs(prepared, response, context)
         return list(self.parse_response(response))
 
+    def format_filter(self, value: datetime.datetime) -> str:
+        """Format a query API filter value in the `filter_timezone` zone."""
+        return format_query_datetime(value, load_zone(self.config.get("filter_timezone")))
+
     def filter_start(self, context: t.Optional[dict]) -> t.Optional[datetime.datetime]:
         """Return the bookmark or start_date, less FILTER_LOOKBACK."""
         if not self.replication_key:
@@ -790,7 +819,7 @@ class SecondChainStream(GainsightStream):
             if lower is None:
                 first = self.condition(rk, "IS_NOT_NULL", [])
             else:
-                first = self.condition(rk, "GTE", [format_query_datetime(lower)])
+                first = self.condition(rk, "GTE", [self.format_filter(lower)])
             page = self.post_page(
                 context,
                 {"conditions": [first], "order": {rk: "asc", tb: "asc"}},
@@ -808,7 +837,7 @@ class SecondChainStream(GainsightStream):
             if not kept:
                 raise FatalAPIError(
                     f"{self.name}: a full page from {rk} GTE "
-                    f"{format_query_datetime(lower) if lower else 'the start'} "
+                    f"{self.format_filter(lower) if lower else 'the start'} "
                     "had no row at or after that value. The API may read the "
                     "filter at a coarser grain. Stopping so no rows are skipped."
                 )
@@ -826,9 +855,9 @@ class SecondChainStream(GainsightStream):
     ) -> t.Iterable[dict]:
         rk, tb = self.replication_key, self.tiebreaker
         bounds = [
-            self.condition(rk, "GTE", [format_query_datetime(second)]),
+            self.condition(rk, "GTE", [self.format_filter(second)]),
             self.condition(
-                rk, "LT", [format_query_datetime(second + datetime.timedelta(seconds=1))]
+                rk, "LT", [self.format_filter(second + datetime.timedelta(seconds=1))]
             ),
         ]
         known_id = self._tiebreak(known[0]) if known else None
@@ -863,10 +892,11 @@ class SecondChainStream(GainsightStream):
         if any(self._second(row) == second for row in rows):
             raise FatalAPIError(
                 f"{self.name}: the API did not return the rows it listed for "
-                f"{rk} {format_query_datetime(second)}, although row {tb} "
+                f"{rk} {self.format_filter(second)}, although row {tb} "
                 f"{row_id} still has that value. It may read the filter in "
                 "another time zone or at a coarser grain. Stopping so no rows "
-                "are skipped."
+                "are skipped. If your Gainsight tenant reads filter times in "
+                "its local time zone, set filter_timezone."
             )
 
     def tiebreak_rows(

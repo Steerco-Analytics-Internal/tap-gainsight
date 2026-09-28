@@ -335,7 +335,7 @@ class CtaSlicedStream(GainsightStream):
     - The first window starts on the day of the bookmark less 24 hours.
     - The shortest window is [d, d+1]. A longer window that fills a page
       is halved and read again. A shortest window that fills a page is
-      paged, with a warning.
+      paged twice and merged by Gsid, with a warning.
     - After a window under half full, the next one doubles, up to a year.
     - A CTA outside its window comes from a server that reads the days in
       another time zone. It is emitted, and counted in a debug log.
@@ -371,22 +371,20 @@ class CtaSlicedStream(GainsightStream):
             if len(rows) >= self.page_size:
                 self.logger.warning(
                     "%s: the window %s to %s has more CTAs than one page. "
-                    "Paging it with pageNumber. The API documents no sort "
-                    "order, so a CTA edited during the sync can be missed "
-                    "until the next run.",
+                    "Reading it twice with pageNumber and merging by Gsid. The "
+                    "API documents no sort order, so an unordered page read "
+                    "can miss a CTA edited during the sync. A miss in a recent "
+                    "window is picked up by the next run's lookback. A miss in "
+                    "an older backfill window is picked up only when that CTA "
+                    "is edited again.",
                     self.name,
                     day.isoformat(),
                     end.isoformat(),
                 )
-            count = 0
-            while True:
-                self._count_outside(rows, day, end)
-                count += len(rows)
-                yield from rows
-                if len(rows) < self.page_size:
-                    break
-                token = {**token, "page": token["page"] + 1}
-                rows = self.post_page(context, token)
+                rows = self._read_twice(context, token, rows)
+            self._count_outside(rows, day, end)
+            count = len(rows)
+            yield from rows
             day = end
             if count < self.page_size // 2:
                 width = min(width * 2, self.max_window_days)
@@ -398,6 +396,42 @@ class CtaSlicedStream(GainsightStream):
                 if len(rows) < self.page_size:
                     break
                 page += 1
+
+    def _read_pages(
+        self, context: t.Optional[dict], token: dict, first: t.List[dict]
+    ) -> t.List[dict]:
+        """Return `first` plus every later page of one pageNumber read."""
+        rows = list(first)
+        page = first
+        while len(page) >= self.page_size:
+            token = {**token, "page": token["page"] + 1}
+            page = self.post_page(context, token)
+            rows.extend(page)
+        return rows
+
+    def _read_twice(
+        self, context: t.Optional[dict], token: dict, first_page: t.List[dict]
+    ) -> t.List[dict]:
+        """Read a window twice with pageNumber, and merge the reads by Gsid.
+
+        Each read is over an unordered result, so each can skip a CTA that
+        moves between pages. A CTA is lost only if it is skipped by both.
+        """
+        merged: t.Dict[str, dict] = {}
+        extra: t.List[dict] = []
+        first_read = self._read_pages(context, token, first_page)
+        second_token = {**token, "page": 1}
+        second_read = self._read_pages(
+            context, second_token, self.post_page(context, second_token)
+        )
+        for rows in (first_read, second_read):
+            for row in rows:
+                key = row.get("Gsid")
+                if key is None:
+                    extra.append(row)
+                else:
+                    merged.setdefault(str(key), row)
+        return list(merged.values()) + extra
 
     def _count_outside(
         self, rows: t.List[dict], first: datetime.date, last: datetime.date
