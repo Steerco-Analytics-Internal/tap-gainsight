@@ -1,0 +1,33 @@
+{
+  "select": [
+    "Company_Name__gc",
+    "Company_ID__gr.csm__gr.name"
+  ],
+  "where": {
+    "conditions": [
+      {
+        "name": "Company_Name__gc",
+        "alias": "A",
+        "value": [
+          "Gainsight"
+        ],
+        "operator": "EQ"
+      },
+      {
+        "name": "Company_ID__gr.csm__gr.name",
+        "alias": "B",
+        "value": [
+          "John"
+        ],
+        "operator": "CONTAINS"
+      }
+    ],
+    "expression": "A AND B"
+  },
+  "orderBy": {
+    "Company_Name__gc": "asc",
+    "Company_ID__gr.csm__gr.name": "desc"
+  },
+  "limit": 100,
+  "offset": 0
+}

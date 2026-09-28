@@ -1,0 +1,101 @@
+"""End to end: the CLI discovers, then syncs with a catalog and state."""
+
+import json
+
+from click.testing import CliRunner
+
+from tap_gainsight.tap import TapGainsight
+from tests.conftest import BASE_URL, CONFIG, load, query_page, query_url
+from tests.test_streams import company_row, cta_row, timeline_row
+
+SYNCED = ["Company", "timeline", "cta", "deleted_records"]
+
+
+def run(args):
+    result = CliRunner(mix_stderr=False).invoke(TapGainsight.cli, args, catch_exceptions=False)
+    assert result.exit_code == 0, result.stderr
+    return result.stdout
+
+
+def parse(stdout):
+    return [json.loads(line) for line in stdout.splitlines() if line.strip()]
+
+
+def test_discover_then_sync_with_catalog_and_state(api, tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(CONFIG))
+
+    # Discovery emits every stream with a full schema.
+    catalog = json.loads(run(["--config", str(config_path), "--discover"]))
+    entries = {entry["tap_stream_id"]: entry for entry in catalog["streams"]}
+    assert set(SYNCED) | {"Company_Person", "GsUser"} <= set(entries)
+    company_props = entries["Company"]["schema"]["properties"]
+    assert "Health_Notes__gc" in company_props and "Csm__gr.Email" in company_props
+    assert entries["Company"]["key_properties"] == ["Gsid"]
+
+    # Select four streams and drop one custom field from Company.
+    for tap_stream_id, entry in entries.items():
+        for item in entry["metadata"]:
+            if not item["breadcrumb"]:
+                item["metadata"]["selected"] = tap_stream_id in SYNCED
+            elif tap_stream_id == "Company" and item["breadcrumb"][-1] == "Is_Active__gc":
+                item["metadata"]["selected"] = False
+    catalog_path = tmp_path / "catalog.json"
+    catalog_path.write_text(json.dumps(catalog))
+
+    old = "2024-02-05T08:24:35.253000+00:00"
+    state = {"bookmarks": {"Company": {"replication_key": "ModifiedDate", "replication_key_value": old}}}
+    state_path = tmp_path / "state.json"
+    state_path.write_text(json.dumps(state))
+
+    rows = [company_row(5), company_row(9)]
+    rows[0]["Health_Notes__gc"] = "Renewal looks safe"
+    rows[0]["Is_Active__gc"] = True
+    api.mocker.post(query_url("Company"), json=query_page(rows))
+    api.mocker.post(query_url("activity_timeline"), json=query_page([timeline_row(1)], records_shape=True))
+    api.mocker.post(f"{BASE_URL}/v2/cockpit/cta/list", json={**load("cta_list_response.json"), "data": [cta_row(3)]})
+    api.mocker.post(query_url("record_delete_log"), json=load("delete_log_response.json"))
+    api.mocker.post(query_url("record_delete_log_high_volume"), json=load("custom_object_query_empty_response.json"))
+
+    messages = parse(run([
+        "--config", str(config_path),
+        "--catalog", str(catalog_path),
+        "--state", str(state_path),
+    ]))
+
+    # Message order: SCHEMA before a stream's RECORDs, STATE after them.
+    seen_schema = set()
+    last_record_index = {}
+    for index, message in enumerate(messages):
+        if message["type"] == "SCHEMA":
+            seen_schema.add(message["stream"])
+        elif message["type"] == "RECORD":
+            assert message["stream"] in seen_schema
+            last_record_index[message["stream"]] = index
+    assert set(last_record_index) == set(SYNCED)
+    state_indexes = [i for i, m in enumerate(messages) if m["type"] == "STATE"]
+    assert state_indexes and state_indexes[-1] > max(last_record_index.values())
+    assert messages[-1]["type"] == "STATE"
+
+    # Only selected streams, and the deselected field is gone.
+    assert {m["stream"] for m in messages if m["type"] == "RECORD"} == set(SYNCED)
+    company_records = [m["record"] for m in messages if m["type"] == "RECORD" and m["stream"] == "Company"]
+    assert company_records[0]["Health_Notes__gc"] == "Renewal looks safe"
+    assert "Is_Active__gc" not in company_records[0]
+
+    # The query used the bookmark and selected the custom field.
+    body = [r for r in api.mocker.request_history if r.path == "/v1/data/objects/query/company"][0].json()
+    assert body["where"]["conditions"][0]["value"] == ["2024-02-05 08:24:35"]
+    assert "Health_Notes__gc" in body["select"] and "Is_Active__gc" not in body["select"]
+
+    # Bookmarks advance.
+    bookmarks = messages[-1]["value"]["bookmarks"]
+    assert bookmarks["Company"]["replication_key_value"] > old
+    assert bookmarks["Company"]["replication_key_value"].startswith("2024-02-05T08:24:44")
+    assert bookmarks["timeline"]["replication_key_value"].startswith("2024-02-05T08:24:36")
+    assert bookmarks["cta"]["replication_key_value"] == "2024-02-05T09:03:35.253Z"
+    delete_partitions = {
+        p["context"]["delete_log"]: p.get("replication_key_value")
+        for p in bookmarks["deleted_records"]["partitions"]
+    }
+    assert delete_partitions["record_delete_log"] == "2024-02-05T08:46:15Z"

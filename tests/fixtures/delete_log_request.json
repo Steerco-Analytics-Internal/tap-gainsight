@@ -1,0 +1,30 @@
+{
+    "select": [
+        "RecordId",
+        "DeletedOn",
+        "ObjectName"
+    ],
+    "where": {
+        "conditions": [
+            {
+                "name": "DeletedOn",
+                "value": [
+                    "2024-02-05 00:00:00"
+                ],
+                "alias": "A",
+                "operator": "GT"
+            },
+            {
+                "name": "ObjectName",
+                "value": [
+                    "Company"
+                ],
+                "alias": "B",
+                "operator": "EQ"
+            }
+        ],
+        "expression": "A AND B"
+    },
+    "limit": 100,
+    "offset": 0
+}

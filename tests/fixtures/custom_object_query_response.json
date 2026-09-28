@@ -1,0 +1,21 @@
+{
+  "result": true,
+  "errorCode": null,
+  "errorDesc": null,
+  "requestId": "8863e73c-a465-4fc6-a385-f7b3200720dc",
+  "data": [
+    {
+      "Company_Name__gc": "Gainsight",
+      "Company_ID__gr.csm__gr.name": "John Nyumbu"
+    },
+    {
+      "Company_Name__gc": "Gainsight",
+      "Company_ID__gr.csm__gr.name": "John Smith"
+    },
+    {
+      "Company_Name__gc": "Gainsight",
+      "Company_ID__gr.csm__gr.name": "Paul Johnson"
+    }
+  ],
+  "message": null
+}

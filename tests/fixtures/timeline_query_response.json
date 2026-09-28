@@ -1,0 +1,22 @@
+{
+    "result": true,
+    "errorCode": null,
+    "errorDesc": null,
+    "requestId": "7814d30f-a17b-44ea-9c03-fd3fdcd4b746",
+    "data": {
+        "records": [
+            {
+                "contextname": "Relationship",
+                "GsRelationshipId": "1P052FF55UXKNWG3E7P0ILJL8B53QH9SRV51",
+                "GsCompanyId": "1P02G76AI7KS5P406VQB2PSRVO1OD4EC163O",
+                "AuthorId": "1P01XWZAME0GW3RXT8L70ZWAX94WHD41SS7U",
+                "ExternalAttendees": null,
+                "Ant__CustomNumber__c": 300,
+                "internalAttendees": "abhilash",
+                "Ant__CustomText__c": "custom text field",
+                "Ant__CustomCheckbox__c": true
+            }
+        ]
+    },
+    "message": null
+}

@@ -1,0 +1,18 @@
+{
+   "objectNames": [
+       "customobj__gc"
+   ],
+   "includeChilds": "true",
+   "childLevels": "0",
+   "populatePickListOptions": "true",
+   "useCollectionId": "false",
+   "removeDeleted": "false",
+   "removeHidden": "false",
+   "host": "MDA",
+   "sortFieldsByLabel": "true",
+   "populateFieldId": "false",
+   "honorUserContext": "true",
+   "honorCustomLookup": "true",
+   "populateAutoSuggestDetails": "true",
+   "externalContext": "false"
+}

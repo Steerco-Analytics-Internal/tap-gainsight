@@ -1,0 +1,125 @@
+{
+"requestId": "7ac6a2e6-85ac-44df-958a-ee4b00384436",
+"result": true,
+"data": [
+     {
+         "objectName": "autoindex10__gc",
+         "label": "AutoIndex10",
+         "objectType": "CUSTOM",
+         "keyPrefix": "1Z02KRI7NHRRVF6ZWJ",
+         "transactional": true,
+         "multiCurrencySupported": false,
+         "readable": true,
+         "createable": true,
+         "schemaUpdateable": true
+     },
+     {
+         "objectName": "company",
+         "label": "Company",
+         "objectType": "STANDARD",
+         "keyPrefix": "1P02C503CKNHR9B14K",
+         "transactional": false,
+         "multiCurrencySupported": false,
+         "readable": true,
+         "createable": true,
+         "schemaUpdateable": true
+     },
+     {
+         "objectName": "company_person",
+         "label": "Company Person",
+         "objectType": "STANDARD",
+         "keyPrefix": "1C01TEHFH1FP2KG5WQ",
+         "transactional": false,
+         "multiCurrencySupported": false,
+         "readable": true,
+         "createable": true,
+         "schemaUpdateable": true
+     },
+     {
+         "objectName": "email_logs",
+         "label": "Email Logs",
+         "objectType": "STANDARD",
+         "transactional": false,
+         "multiCurrencySupported": false,
+         "readable": true,
+         "createable": true,
+         "schemaUpdateable": true
+     },
+     {
+         "objectName": "email_raw_events",
+         "label": "Email Raw Events",
+         "objectType": "SYSTEM",
+         "transactional": false,
+         "multiCurrencySupported": false,
+         "readable": true,
+         "createable": false,
+         "schemaUpdateable": false
+     },
+     {
+         "objectName": "obj1__gc",
+         "label": "Obj1",
+         "objectType": "CUSTOM",
+         "keyPrefix": "1Z024OYZBEOENYQ9RH",
+         "transactional": true,
+         "multiCurrencySupported": false,
+         "readable": true,
+         "createable": true,
+         "schemaUpdateable": true
+     },
+     {
+         "objectName": "relationship",
+         "label": "Relationship",
+         "objectType": "STANDARD",
+         "keyPrefix": "1P05VX75GX1CCNZ59W",
+         "transactional": false,
+         "multiCurrencySupported": false,
+         "readable": true,
+         "createable": true,
+         "schemaUpdateable": true
+     },
+     {
+         "objectName": "relationship_person",
+         "label": "Relationship Person",
+         "objectType": "STANDARD",
+         "keyPrefix": "1C03FQDZ4TJLWHYROF",
+         "transactional": false,
+         "multiCurrencySupported": false,
+         "readable": true,
+         "createable": true,
+         "schemaUpdateable": true
+     },
+     {
+         "objectName": "sponsor_tracking",
+         "label": "Sponsor Tracking",
+         "objectType": "STANDARD",
+         "keyPrefix": "1S075PAB66AVNGO818Y",
+         "transactional": false,
+         "multiCurrencySupported": false,
+         "readable": true,
+         "createable": false,
+         "schemaUpdateable": true
+     },
+     {
+         "objectName": "gsuser",
+         "label": "User",
+         "objectType": "STANDARD",
+         "keyPrefix": "1P01N68IASVWNJD6IE",
+         "transactional": false,
+         "multiCurrencySupported": false,
+         "readable": true,
+         "createable": true,
+         "schemaUpdateable": true
+     },
+     {
+         "objectName": "user_shared_detail",
+         "label": "User Shared Detail",
+         "objectType": "STANDARD",
+         "keyPrefix": "P02",
+         "transactional": false,
+         "multiCurrencySupported": false,
+         "readable": true,
+         "createable": false,
+         "schemaUpdateable": true
+     }
+]
+}

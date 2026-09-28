@@ -1,0 +1,40 @@
+{
+  "select": [
+    "Name",
+    "Renewal_Date",
+    "Status",
+    "Stage",
+    "Customer_Lifetime_in_Months",
+    "csm__gr.email"
+  ],
+  "where": {
+    "conditions": [
+      {
+        "name": "Renewal_Date",
+        "alias": "A",
+        "value": [
+          "03-22-2018",
+          "05-21-2018"
+        ],
+        "operator": "BTW"
+      },
+      {
+        "name": "Stage",
+        "alias": "B",
+        "value": [
+          "New Customer",
+          "Kicked Off",
+          "Launched"
+        ],
+        "operator": "IN"
+      }
+    ],
+    "expression": "A OR B"
+  },
+  "orderBy": {
+    "Renewal_Date__gc": "asc",
+    "Company_ID__gr.stage": "desc"
+  },
+  "limit": 100,
+  "offset": 0
+}

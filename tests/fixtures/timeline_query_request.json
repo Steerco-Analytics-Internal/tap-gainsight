@@ -1,0 +1,34 @@
+{
+    "select": [
+        "Gsid",
+        "CreatedDate",
+        "contextname",
+        "GsRelationshipId",
+        "GsCompanyId",
+        "AuthorId",
+        "InternalAttendees",
+        "ExternalAttendees",
+        "Ant__CustomNumber__c",
+        "internalAttendees",
+        "Ant__CustomText__c",
+        "Ant__CustomCheckbox__c"
+    ],
+    "where": {
+        "conditions": [
+            {
+                "name": "ExternalId",
+                "alias": "A",
+                "value": [
+                    "01c43677-5cc8-4309-88e8-d929024abdc1"
+                ],
+                "operator": "EQ"
+            }
+        ],
+        "expression": "A"
+    },
+    "orderBy": {
+        "CreatedDate": "desc"
+    },
+    "limit": 5000,
+    "offset": 0
+}

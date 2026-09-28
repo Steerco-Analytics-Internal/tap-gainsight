@@ -1,0 +1,101 @@
+{
+    "requestId": "30c9352a-b996-472a-a662-3e09fbf0fad6",
+    "result": true,
+    "data": {
+        "categoryDetails": {
+            "createdAt": 1677922074238,
+            "deleted": false,
+            "modifiedAt": 1677922074238,
+            "name": "LicenseType",
+            "description": "LicenseType",
+            "type": "SYSTEM",
+            "count": 5,
+            "limit": 500,
+            "variant": "SINGLE_SELECT",
+            "systemName": "LicenseType",
+            "gsid": "1I00K3A4X4T2UWD3COJ3FU0KMKYXZL9WEEFK"
+        },
+        "childItems": [
+            {
+                "createdAt": 1677922074249,
+                "deleted": false,
+                "modifiedAt": 1677922074249,
+                "name": "Viewer",
+                "description": "Viewer License",
+                "displayOrder": 1,
+                "shortName": null,
+                "color": null,
+                "active": true,
+                "systemDefined": true,
+                "systemName": "Viewer",
+                "default": false,
+                "categoryId": "1I00K3A4X4T2UWD3COJ3FU0KMKYXZL9WEEFK",
+                "gsid": "1I00AABNSR5CLLWSP3IK3IVPS8983FQVHJ2H"
+            },
+            {
+                "createdAt": 1677922074249,
+                "deleted": false,
+                "modifiedAt": 1677922074249,
+                "name": "Full",
+                "description": "Full License",
+                "displayOrder": 2,
+                "shortName": null,
+                "color": null,
+                "active": true,
+                "systemDefined": true,
+                "systemName": "Full",
+                "default": false,
+                "categoryId": "1I00K3A4X4T2UWD3COJ3FU0KMKYXZL9WEEFK",
+                "gsid": "1I00AABNSR5CLLWSP3WTEJAI22CWWL8D6YQ8"
+            },
+            {
+                "createdAt": 1677922074249,
+                "deleted": false,
+                "modifiedAt": 1677922074249,
+                "name": "External",
+                "description": "External",
+                "displayOrder": 3,
+                "shortName": null,
+                "color": null,
+                "active": true,
+                "systemDefined": true,
+                "systemName": "External",
+                "default": false,
+                "categoryId": "1I00K3A4X4T2UWD3COJ3FU0KMKYXZL9WEEFK",
+                "gsid": "1I00AABNSR5CLLWSP3F09ND6JHASXGUW8BW4"
+            },
+            {
+                "createdAt": 1677922074249,
+                "deleted": false,
+                "modifiedAt": 1677922074249,
+                "name": "Internal_Collaborator",
+                "description": "Internal Collaborator",
+                "displayOrder": 4,
+                "shortName": null,
+                "color": null,
+                "active": true,
+                "systemDefined": true,
+                "systemName": "Internal_Collaborator",
+                "default": false,
+                "categoryId": "1I00K3A4X4T2UWD3COJ3FU0KMKYXZL9WEEFK",
+                "gsid": "1I00AABNSR5CLLWSP3SDI6N47DFH0XM4BMT4"
+            },
+            {
+                "createdAt": 1677922074249,
+                "deleted": false,
+                "modifiedAt": 1677922074249,
+                "name": "Viewer_Analytics",
+                "description": "Viewer Analytics",
+                "displayOrder": 5,
+                "shortName": null,
+                "color": null,
+                "active": true,
+                "systemDefined": true,
+                "systemName": "Viewer_Analytics",
+                "default": false,
+                "categoryId": "1I00K3A4X4T2UWD3COJ3FU0KMKYXZL9WEEFK",
+                "gsid": "1I00AABNSR5CLLWSP3XP4Z60275S4B1TCIJM"
+            }
+        ]
+    }
+}

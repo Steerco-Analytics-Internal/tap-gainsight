@@ -1,0 +1,33 @@
+{
+  "result": true,
+  "errorCode": null,
+  "errorDesc": null,
+  "requestId": "8863e73c-a465-4fc6-a385-f7b3200720dc",
+  "data": [
+    {
+      "Name": "Heroku",
+      "Renewal_Date": 1521743018667,
+      "Status": "1P01OI3OHC9S79J7VN8GQLUQDH0Y52CYFMXW",
+      "Stage": "1I0054U9FAKXZ0H26HO92M3F1G5SPWVQDNF3",
+      "Customer_Lifetime_in_Months": 22,
+      "csm__gr.email": "jnash@heroku.com"
+    },
+    {
+      "Name": "ABC Inc.",
+      "Renewal_Date": 1521743018667,
+      "Status": "1P01OI3OHC9S79J7VN8GQLUQDH0Y52CYFMXW",
+      "Stage": "1I0054U9FAKXZ0H26HO92M3F1G5SPWVQDNF3",
+      "Customer_Lifetime_in_Months": 15,
+      "csm__gr.email": "cbrown@abc.com"
+    },
+    {
+      "Name": "XYZ Inc.",
+      "Renewal_Date": 1521743018667,
+      "Status": "1P01OI3OHC9S79J7VN8GQLUQDH0Y52CYFMXW",
+      "Stage": "1I0054U9FAKXZ0H26HO92M3F1G5SPWVQDNF3",
+      "Customer_Lifetime_in_Months": 6,
+      "csm__gr.email": "dbess@xyz.com"
+    }
+  ],
+  "message": null
+}

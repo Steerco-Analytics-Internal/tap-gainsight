@@ -1,0 +1,21 @@
+{
+    "select": [
+        "name",
+        "Comments",
+        "CompanyId",
+        "ModifiedDate"
+    ],
+    "where": {
+        "conditions": [
+            {
+                "fieldName": "ModifiedDate",
+                "literal": "TODAY",
+                "alias": "A",
+                "operator": "EQ"
+            }
+        ],
+        "expression": "A"
+    },
+    "pageSize": 100,
+    "pageNumber": 1
+}
