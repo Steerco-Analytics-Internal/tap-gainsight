@@ -436,3 +436,38 @@ def query_url(object_name: str) -> str:
 
 def requests_to(mocker: requests_mock_lib.Mocker, path: str) -> t.List[t.Any]:
     return [r for r in mocker.request_history if r.path == path]
+
+
+SENT_REQUESTS: t.List[t.Tuple[str, str, t.Any]] = []
+
+
+@pytest.fixture(scope="session", autouse=True)
+def every_request_is_on_the_allowlist() -> t.Iterator[None]:
+    """Record every request the suite sends, and check each at the end.
+
+    Requests are recorded at the transport adapters: the requests-mock
+    adapter and the real HTTPAdapter. Every request that leaves a Session
+    passes through one of them. A request the tap refuses never gets there.
+    """
+    import requests.adapters
+    import requests_mock.adapter
+
+    from tap_gainsight.safety import check_request
+
+    originals = {}
+    for cls in (requests_mock.adapter.Adapter, requests.adapters.HTTPAdapter):
+        originals[cls] = cls.send
+
+        def recording_send(self: t.Any, request: t.Any, *args: t.Any, _send=cls.send, **kwargs: t.Any) -> t.Any:
+            SENT_REQUESTS.append((request.method, request.url, request.body))
+            return _send(self, request, *args, **kwargs)
+
+        cls.send = recording_send  # type: ignore[method-assign]
+    try:
+        yield
+    finally:
+        for cls, send in originals.items():
+            cls.send = send  # type: ignore[method-assign]
+    assert SENT_REQUESTS, "The suite sent no requests, so the check proved nothing."
+    for method, url, body in SENT_REQUESTS:
+        check_request(method, url, body)

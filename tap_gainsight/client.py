@@ -32,6 +32,8 @@ from singer_sdk import metrics
 from singer_sdk.exceptions import FatalAPIError
 from singer_sdk.streams import RESTStream
 
+from tap_gainsight import safety
+
 DEFAULT_HOST_SUFFIX = ".gainsightcloud.com"
 BODY_EXCERPT_LENGTH = 500
 MAX_TRIES = 8
@@ -158,8 +160,15 @@ def normalize_domain(value: str) -> str:
 
 
 def body_excerpt(response: requests.Response) -> str:
-    """Return the start of a response body, for error messages."""
+    """Return the start of a response body, for error messages.
+
+    An access key the body echoes back is replaced with `***`.
+    """
     text = response.text or ""
+    request = getattr(response, "request", None)
+    key = request.headers.get("AccessKey") if request is not None else None
+    if key:
+        text = text.replace(key, "***")
     if len(text) > BODY_EXCERPT_LENGTH:
         return text[:BODY_EXCERPT_LENGTH] + "..."
     return text
@@ -402,9 +411,11 @@ class GainsightMetadataClient:
         config: t.Mapping[str, t.Any],
         rate_limiter: RateLimiter,
         session: t.Optional[requests.Session] = None,
+        budget: t.Optional[safety.RequestBudget] = None,
     ) -> None:
         self.base_url = normalize_domain(config["domain"])
         self.rate_limiter = rate_limiter
+        self.budget = budget
         self.session = session or requests.Session()
         # Docs: pass the access key in the "accesskey" header. Header names
         # are case-insensitive in HTTP.
@@ -432,14 +443,15 @@ class GainsightMetadataClient:
             max_tries=MAX_TRIES,
         )
         def _call() -> requests.Response:
-            self.rate_limiter.acquire()
-            response = self.session.request(
-                method,
-                url,
-                params=params,
-                json=body,
+            prepared = self.session.prepare_request(
+                requests.Request(method, url, params=params, json=body)
+            )
+            response = safety.send(
+                self.session,
+                prepared,
+                self.rate_limiter,
+                self.budget,
                 timeout=REQUEST_TIMEOUT_SECONDS,
-                allow_redirects=False,
             )
             status = response.status_code
             if status == 429 or status >= 500:
@@ -572,12 +584,15 @@ class GainsightStream(RESTStream):
         prepared_request: requests.PreparedRequest,
         context: t.Optional[dict],
     ) -> requests.Response:
-        # Runs once per attempt, so retries count against the limit too.
-        self.rate_limiter.acquire()
-        # Redirects are never followed. requests would resend the AccessKey
-        # header to the new host, because it strips only Authorization.
-        response = self.requests_session.send(
-            prepared_request, timeout=self.timeout, allow_redirects=False
+        # Runs once per attempt, so retries count against the limits too.
+        # safety.send refuses anything but an allowed read, and never
+        # follows a redirect.
+        response = safety.send(
+            self.requests_session,
+            prepared_request,
+            self.rate_limiter,
+            self._tap.request_budget,  # type: ignore[attr-defined]
+            timeout=self.timeout,
         )
         self._write_request_duration_log(
             endpoint=self.path, response=response, context=context, extra_tags=None
@@ -804,7 +819,7 @@ class SecondChainStream(GainsightStream):
         if value is None:
             raise FatalAPIError(
                 f"{self.name}: a row lacks {self.tiebreaker}, which paging "
-                f"needs: {str(row)[:BODY_EXCERPT_LENGTH]}"
+                f"needs. The row has the fields {sorted(row)}."
             )
         return str(value)
 

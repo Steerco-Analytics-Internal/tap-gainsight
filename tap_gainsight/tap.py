@@ -12,9 +12,11 @@ from tap_gainsight.client import (
     GainsightAPIError,
     GainsightAuthError,
     GainsightMetadataClient,
+    RATE_LIMIT_CALLS,
     RateLimiter,
     load_zone,
 )
+from tap_gainsight.safety import RequestBudget
 from tap_gainsight.streams import (
     CtaDeletedStream,
     CtaStream,
@@ -91,6 +93,23 @@ class TapGainsight(Tap):
             ),
         ),
         th.Property(
+            "max_requests_per_minute",
+            th.IntegerType,
+            description=(
+                "Optional client-side request rate, from 1 to 100. Gainsight "
+                "documents 100 synchronous calls a minute, so the default is "
+                "100 and it can only be lowered."
+            ),
+        ),
+        th.Property(
+            "max_requests",
+            th.IntegerType,
+            description=(
+                "Optional hard cap on requests in one run, retries included. "
+                "The run stops with an error when it is reached."
+            ),
+        ),
+        th.Property(
             "objects",
             th.ArrayType(th.StringType),
             description=(
@@ -112,22 +131,45 @@ class TapGainsight(Tap):
         warnings, errors = super()._validate_config(
             raise_errors=raise_errors, warnings_as_errors=warnings_as_errors
         )
+        problems: t.List[str] = []
         try:
             load_zone(self.config.get("filter_timezone"))
         except ValueError as exc:
-            if raise_errors:
-                raise ConfigValidationError(f"Config validation failed: {exc}") from exc
-            errors.append(str(exc))
+            problems.append(str(exc))
+        rate = self.config.get("max_requests_per_minute")
+        if rate is not None and not (isinstance(rate, int) and 1 <= rate <= RATE_LIMIT_CALLS):
+            problems.append(
+                f"max_requests_per_minute must be from 1 to {RATE_LIMIT_CALLS}, "
+                f"got {rate!r}. It can only lower the documented limit."
+            )
+        cap = self.config.get("max_requests")
+        if cap is not None and not (isinstance(cap, int) and cap >= 1):
+            problems.append(f"max_requests must be 1 or more, got {cap!r}.")
+        if problems and raise_errors:
+            raise ConfigValidationError("Config validation failed: " + " ".join(problems))
+        errors.extend(problems)
         return warnings, errors
+
+    _request_budget: t.Optional[RequestBudget] = None
 
     @property
     def rate_limiter(self) -> RateLimiter:
         if self._rate_limiter is None:
-            self._rate_limiter = RateLimiter()
+            calls = self.config.get("max_requests_per_minute") or RATE_LIMIT_CALLS
+            self._rate_limiter = RateLimiter(calls=min(int(calls), RATE_LIMIT_CALLS))
         return self._rate_limiter
 
+    @property
+    def request_budget(self) -> RequestBudget:
+        """One count of requests for the whole run, discovery included."""
+        if self._request_budget is None:
+            self._request_budget = RequestBudget(self.config.get("max_requests"))
+        return self._request_budget
+
     def metadata_client(self) -> GainsightMetadataClient:
-        return GainsightMetadataClient(self.config, self.rate_limiter)
+        return GainsightMetadataClient(
+            self.config, self.rate_limiter, budget=self.request_budget
+        )
 
     def _describe_all(
         self,
