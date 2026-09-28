@@ -2,10 +2,10 @@
 
 from singer_sdk import typing as th
 
-from tap_template.client import TemplateStream
+from tap_gainsight.client import GainsightStream
 
 
-class ExampleStream(TemplateStream):
+class ExampleStream(GainsightStream):
     name = "example"
     path = "/example"
     primary_keys = ["id"]

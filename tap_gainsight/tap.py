@@ -5,15 +5,15 @@ from typing import List
 from singer_sdk import Stream, Tap
 from singer_sdk import typing as th
 
-from tap_template.streams import ExampleStream
+from tap_gainsight.streams import ExampleStream
 
 STREAM_TYPES = [ExampleStream]
 
 
-class TapTemplate(Tap):
+class TapGainsight(Tap):
     """Singer tap template — rename to TapYourThing."""
 
-    name = "tap-template"
+    name = "tap-gainsight"
 
     config_jsonschema = th.PropertiesList(
         th.Property(
@@ -34,4 +34,4 @@ class TapTemplate(Tap):
 
 
 if __name__ == "__main__":
-    TapTemplate.cli()
+    TapGainsight.cli()

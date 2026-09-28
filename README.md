@@ -1,10 +1,10 @@
-# tap-template
+# tap-gainsight
 
 Template for new Singer taps. Click **Use this template** (top-right on GitHub) to bootstrap a new tap.
 
 ## What you get out of the box
 
-- Meltano-SDK tap scaffold (`tap_template/tap.py`, `client.py`, `streams.py`)
+- Meltano-SDK tap scaffold (`tap_gainsight/tap.py`, `client.py`, `streams.py`)
 - Poetry-based packaging (`pyproject.toml`)
 - A smoke test (`tests/test_tap.py`)
 - GitHub Actions workflow named `CI` — already satisfies the org's required status check
@@ -18,12 +18,12 @@ After creating your repo from this template, find-and-replace these tokens:
 
 | Find | Replace with |
 |---|---|
-| `tap-template` | `tap-yourthing` (kebab-case package name) |
-| `tap_template` | `tap_yourthing` (snake_case module name) |
-| `TapTemplate` | `TapYourThing` (PascalCase class name) |
+| `tap-gainsight` | `tap-yourthing` (kebab-case package name) |
+| `tap_gainsight` | `tap_yourthing` (snake_case module name) |
+| `TapGainsight` | `TapYourThing` (PascalCase class name) |
 | `TemplateStream` | `YourThingStream` (PascalCase base stream) |
 
-Then rename the `tap_template/` directory to match.
+Then rename the `tap_gainsight/` directory to match.
 
 One-liner that does all of the above (run from repo root):
 
@@ -35,11 +35,11 @@ PASCAL="Tap$(echo "$NAME" | awk '{print toupper(substr($0,1,1)) tolower(substr($
 
 find . -type f \( -name '*.py' -o -name '*.toml' -o -name '*.yml' -o -name '*.md' \) \
   -not -path './.git/*' -exec sed -i '' \
-  -e "s/tap-template/$KEBAB/g" \
-  -e "s/tap_template/$SNAKE/g" \
-  -e "s/TapTemplate/$PASCAL/g" {} +
+  -e "s/tap-gainsight/$KEBAB/g" \
+  -e "s/tap_gainsight/$SNAKE/g" \
+  -e "s/TapGainsight/$PASCAL/g" {} +
 
-mv tap_template "$SNAKE"
+mv tap_gainsight "$SNAKE"
 ```
 
 ## Customizing the tap

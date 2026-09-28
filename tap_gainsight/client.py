@@ -5,7 +5,7 @@ from typing import Any, Dict, Iterable
 from singer_sdk.streams import RESTStream
 
 
-class TemplateStream(RESTStream):
+class GainsightStream(RESTStream):
     """Base class for streams hitting the upstream API."""
 
     @property
