@@ -24,13 +24,13 @@ DOCUMENTED_OPERATORS = {
     "CONTAINS", "DOES_NOT_CONTAINS", "STARTS_WITH", "ENDS_WITH",
     "INCLUDES", "IN", "EXCLUDES", "NOT_IN",
 }
-# Timeline APIs, Data Type table: DateTime "yyyy-MM-dd'T'HH:mm:ss.SSSZ".
-API_DATETIME = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}\+0000$")
 # Retrieve Deleted Data API sample: "2024-02-05 00:00:00".
 QUERY_DATETIME = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
-# Documented expressions are aliases joined by AND or OR. Parentheses are
-# the tap's addition for the keyset page, and are unconfirmed.
-EXPRESSION = re.compile(r"^[A-Z](?: (?:AND|OR) \(?[A-Z](?: (?:AND|OR) [A-Z])*\)?)*$")
+# CTA and Task samples: date-only values, as in "2020-04-14".
+DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# Documented expressions join aliases with AND, as in "A AND B". The tap
+# sends at most three terms. The third is the one extension beyond the docs.
+EXPRESSION = re.compile(r"^[A-Z](?: AND [A-Z]){0,2}$")
 
 
 def documented_query_keys():
@@ -70,14 +70,14 @@ def assert_where(where, key_sets, date_format):
         if condition["operator"] in {"IS_NULL", "IS_NOT_NULL"}:
             assert condition["value"] == []
     for condition in where["conditions"]:
-        if condition["operator"] in {"GT", "GTE", "LT", "EQ"} and condition.get("name", condition.get("fieldName")) in {"ModifiedDate", "DeletedOn"}:
-            assert date_format.match(condition["value"][0])
+        if condition.get("name", condition.get("fieldName")) in {"ModifiedDate", "DeletedOn"}:
+            assert all(date_format.match(value) for value in condition["value"])
 
 
 @pytest.mark.parametrize(
     "stream_name, object_name, request_fixture, make_row, shape",
     [
-        ("Company", "company", "company_query_request.json", company_row, "list"),
+        ("Company", "Company", "company_query_request.json", company_row, "list"),
         ("timeline", "activity_timeline", "timeline_query_request.json", timeline_row, "records"),
     ],
 )
@@ -102,36 +102,53 @@ def test_mda_queries_match_the_documented_shape(api, stream_name, object_name, r
         assert_documented_headers(request)
         body = request.json()
         assert set(body) <= documented_query_keys()
-        assert_where(body["where"], key_sets, API_DATETIME)
-        assert body["offset"] >= 0
+        assert_where(body["where"], key_sets, QUERY_DATETIME)
+        assert body["offset"] == 0
 
-    first, keyset, probe = (r.json() for r in requests[:3])
+    first, drain, probe = (r.json() for r in requests[:3])
     # First page: the documented body keys, filtered from the start less 24 hours.
     assert set(first) == set(documented)
     assert first["select"] == stream.select_paths()
     assert set(first["select"]) >= set(stream.plan.fields)
-    assert (first["limit"], first["offset"]) == (2, 0)
+    assert first["limit"] == 2
     assert first["where"] == {
-        "conditions": [{"name": "ModifiedDate", "alias": "A", "value": ["2024-02-04T08:34:35.000+0000"], "operator": "GTE"}],
+        "conditions": [{"name": "ModifiedDate", "alias": "A", "value": ["2024-02-04 08:34:35"], "operator": "GTE"}],
         "expression": "A",
     }
     assert first["orderBy"] == {"ModifiedDate": "asc", "Gsid": "asc"}
-    # Keyset page.
-    assert keyset["where"]["expression"] == "A OR (B AND C)"
-    assert [(c["name"], c["operator"]) for c in keyset["where"]["conditions"]] == [
-        ("ModifiedDate", "GT"), ("ModifiedDate", "EQ"), ("Gsid", "GTE"),
-    ]
-    # The anchor moved, so the tap reads it by Gsid.
+    # Drain of the page's last second, ordered by Gsid.
+    assert drain["where"] == {
+        "conditions": [
+            {"name": "ModifiedDate", "alias": "A", "value": ["2024-02-05 08:24:36"], "operator": "GTE"},
+            {"name": "ModifiedDate", "alias": "B", "value": ["2024-02-05 08:24:37"], "operator": "LT"},
+        ],
+        "expression": "A AND B",
+    }
+    assert drain["orderBy"] == {"Gsid": "asc"}
+    # The row listed in that second moved, so the tap reads it by Gsid.
     assert probe["select"] == ["Gsid", "ModifiedDate"]
-    assert probe["where"]["conditions"][0]["operator"] == "EQ"
-    assert probe["limit"] == 1
+    assert [(c["name"], c["operator"]) for c in probe["where"]["conditions"]] == [("Gsid", "EQ")]
+    assert probe["orderBy"] == {"ModifiedDate": "asc"}
     # Null pass last.
     last = requests[-1].json()
     assert last["where"]["conditions"][0]["operator"] == "IS_NULL"
     assert last["orderBy"] == {"Gsid": "asc"}
 
 
-def test_full_table_object_pages_by_offset_sorted_by_gsid(api):
+def test_a_three_term_drain_is_the_widest_request(api):
+    rows = [company_row(i, modified=1707121475253) for i in range(5)]
+    engine = api.serve(query_url("Company"), QueryEngine(rows, {"ModifiedDate"}))
+    stream = make_tap().streams["Company"]
+    stream.page_size = 2
+    stream.sync()
+    widest = max(engine.bodies, key=lambda b: len(b["where"]["conditions"]))
+    assert widest["where"]["expression"] == "A AND B AND C"
+    assert [(c["name"], c["operator"]) for c in widest["where"]["conditions"]] == [
+        ("ModifiedDate", "GTE"), ("ModifiedDate", "LT"), ("Gsid", "GT"),
+    ]
+
+
+def test_full_table_object_pages_by_gsid(api):
     from tests.conftest import describe_entry, doc_field
 
     api.describes["obj1__gc"] = describe_entry("obj1__gc", [doc_field("Gsid", "obj1__gc")])
@@ -141,12 +158,12 @@ def test_full_table_object_pages_by_offset_sorted_by_gsid(api):
     assert len(list(stream.get_records(None))) == 3
     assert [(b.get("where"), b["orderBy"], b["offset"]) for b in engine.bodies] == [
         (None, {"Gsid": "asc"}, 0),
-        (None, {"Gsid": "asc"}, 2),
+        ({"conditions": [{"name": "Gsid", "alias": "A", "value": ["G1"], "operator": "GT"}], "expression": "A"}, {"Gsid": "asc"}, 0),
     ]
 
 
 def test_company_select_includes_lookup_paths(api):
-    engine = api.serve(query_url("company"), QueryEngine([], {"ModifiedDate"}))
+    engine = api.serve(query_url("Company"), QueryEngine([], {"ModifiedDate"}))
     list(make_tap().streams["Company"].get_records(None))
     select = engine.bodies[0]["select"]
     assert {"Csm__gr.Name", "Csm__gr.Email", "CreatedBy__gr.Name", "Health_Notes__gc"} <= set(select)
@@ -172,16 +189,17 @@ def test_cta_requests_match_the_documented_shape(api, stream_name, path, documen
         assert set(body) <= documented_keys
         assert set(body) == {"select", "where", "pageSize", "pageNumber"}
         assert body["pageSize"] == 1000 and body["pageNumber"] == 1
-        assert_where(body["where"], key_sets, API_DATETIME)
+        assert_where(body["where"], key_sets, DATE_ONLY)
         if documented_select is not None:
             assert body["select"] == documented_select
     first = engine.bodies[0]
+    # The documented CTA filter: BTW with date-only values, as in the
+    # Fetch CTA "Between" sample and the deleted-Task sample.
     assert first["where"] == {
         "conditions": [
-            {"fieldName": "ModifiedDate", "value": ["2024-02-04T08:34:35.000+0000"], "alias": "A", "operator": "GTE"},
-            {"fieldName": "ModifiedDate", "value": ["2024-02-05T08:34:35.000+0000"], "alias": "B", "operator": "LT"},
+            {"fieldName": "ModifiedDate", "value": ["2024-02-04", "2024-02-05"], "alias": "A", "operator": "BTW"},
         ],
-        "expression": "A AND B",
+        "expression": "A",
     }
 
 

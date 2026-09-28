@@ -22,7 +22,7 @@ from tests.conftest import (
 
 
 def test_long_error_bodies_are_cut_to_an_excerpt(api):
-    api.mocker.post(query_url("company"), status_code=400, text="x" * 2000)
+    api.mocker.post(query_url("Company"), status_code=400, text="x" * 2000)
     with pytest.raises(FatalAPIError) as info:
         list(make_tap().streams["Company"].get_records(None))
     assert "x" * client.BODY_EXCERPT_LENGTH + "..." in str(info.value)
@@ -30,9 +30,9 @@ def test_long_error_bodies_are_cut_to_an_excerpt(api):
 
 
 def test_user_agent_setting_is_sent(api):
-    api.mocker.post(query_url("company"), json=query_page([]))
+    api.mocker.post(query_url("Company"), json=query_page([]))
     list(make_tap(user_agent="steerco-hotglue/1").streams["Company"].get_records(None))
-    request = [r for r in api.mocker.request_history if r.path == "/v1/data/objects/query/company"][0]
+    request = [r for r in api.mocker.request_history if r.path == "/v1/data/objects/query/Company"][0]
     assert request.headers["User-Agent"] == "steerco-hotglue/1"
 
 
@@ -109,7 +109,7 @@ def test_auth_failure_during_one_by_one_retry_raises(api):
 def test_connection_errors_in_streams_are_retried(api):
     engine = QueryEngine([{"Gsid": "1", "ModifiedDate": 1}], {"ModifiedDate"})
     api.mocker.post(
-        query_url("company"),
+        query_url("Company"),
         [
             {"exc": requests.exceptions.ConnectionError("reset")},
             {"json": lambda request, context: engine.respond(request.json())},
@@ -130,7 +130,7 @@ def test_parse_api_datetime_edges():
 
 
 def test_base_hooks_must_be_overridden(api):
-    from tap_gainsight.client import GainsightStream, KeysetStream
+    from tap_gainsight.client import GainsightStream, SecondChainStream
     from tap_gainsight.streams import CtaSlicedStream
 
     tap = make_tap()
@@ -138,8 +138,8 @@ def test_base_hooks_must_be_overridden(api):
     with pytest.raises(NotImplementedError):
         list(GainsightStream.fetch_rows(stream, None))
     with pytest.raises(NotImplementedError):
-        KeysetStream.base_payload(stream)
-    assert KeysetStream.can_sort_by_tiebreaker(stream) is True
+        SecondChainStream.base_payload(stream)
+    assert SecondChainStream.can_sort_by_tiebreaker(stream) is True
     with pytest.raises(NotImplementedError):
         CtaSlicedStream.select_list(tap.streams["cta"])
 
@@ -168,3 +168,46 @@ def test_cta_null_pass_pages_until_short(api):
     assert sorted(got) == sorted(r["Gsid"] for r in rows)
     null_pages = [b["pageNumber"] for b in engine.bodies if b["where"]["conditions"][0]["operator"] == "IS_NULL"]
     assert null_pages == [1, 2]
+
+
+def test_an_unsortable_gsid_falls_back_to_offset_paging(api):
+    api.describes["obj1__gc"] = describe_entry(
+        "obj1__gc", [doc_field("Gsid", "obj1__gc", meta={"sortable": False})]
+    )
+    engine = QueryEngine([{"Gsid": f"G{i}"} for i in range(3)], set())
+    api.serve(query_url("obj1__gc"), engine)
+    stream = make_tap().streams["obj1__gc"]
+    stream.page_size = 2
+    assert len(list(stream.get_records(None))) == 3
+    assert [(b.get("orderBy"), b["offset"]) for b in engine.bodies] == [(None, 0), (None, 2)]
+
+
+def _select_only(catalog, stream_id):
+    for entry in catalog["streams"]:
+        for item in entry["metadata"]:
+            item["metadata"]["selected"] = entry["tap_stream_id"] == stream_id
+    return catalog
+
+
+def test_a_selected_column_gone_from_a_fixed_schema_stream_warns(api, caplog):
+    import logging
+
+    logging.getLogger("tap-gainsight").addHandler(caplog.handler)
+    catalog = _select_only(make_tap().catalog_dict, "cta_deleted")
+    for entry in catalog["streams"]:
+        if entry["tap_stream_id"] == "cta_deleted":
+            entry["schema"]["properties"]["Retired__gc"] = {"type": ["null", "string"]}
+            entry["metadata"].append({"breadcrumb": ["properties", "Retired__gc"], "metadata": {"selected": True}})
+    assert "cta_deleted" in make_tap(catalog=catalog).streams
+    assert "cta_deleted.Retired__gc" in caplog.text
+
+
+def test_a_selected_lookup_column_whose_field_was_deleted_warns(api, caplog):
+    import logging
+
+    logging.getLogger("tap-gainsight").addHandler(caplog.handler)
+    catalog = _select_only(make_tap().catalog_dict, "Company")
+    fields = api.describes["company"]["fields"]
+    api.describes["company"]["fields"] = [f for f in fields if f["fieldName"] != "Csm"]
+    assert "Company" in make_tap(catalog=catalog).streams
+    assert "Company.Csm__gr.Email" in caplog.text

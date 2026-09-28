@@ -8,13 +8,9 @@ from urllib.parse import urlparse
 
 from singer_sdk import typing as th
 
-from singer_sdk.exceptions import FatalAPIError
-
 from tap_gainsight.client import (
     GainsightStream,
-    KeysetStream,
-    format_api_datetime,
-    format_query_datetime,
+    SecondChainStream,
     is_date_type,
     is_object_not_found,
     json_schema_for,
@@ -40,19 +36,15 @@ LOOKUP_RELATED_FIELDS = {
 LABEL_SCHEMA = {"type": ["null", "string", "array"], "items": {"type": "string"}}
 
 
-def is_retired_field(field: dict) -> bool:
-    """Return True for a describe field flagged hidden or deleted.
+def is_deleted_field(field: dict) -> bool:
+    """Return True for a describe field flagged deleted.
 
-    The describe sample's field `meta` has `hidden`. Its lookup details
-    carry `deleted`. Either flag, on the field or its meta, leaves the field
-    out of the schema and the select list.
+    The describe sample's lookup details carry a `deleted` key. The flag,
+    on the field or its meta, leaves the field out of the schema and the
+    select list. Hidden fields stay: hiding changes the UI, not the data.
     """
     meta = field.get("meta") if isinstance(field.get("meta"), dict) else {}
-    return any(
-        container.get(flag) is True
-        for container in (field, meta)
-        for flag in ("hidden", "deleted")
-    )
+    return field.get("deleted") is True or meta.get("deleted") is True
 
 
 def _containers(field: dict) -> t.List[dict]:
@@ -136,7 +128,7 @@ class ObjectPlan:
 
         for field in fields:
             name = field.get("fieldName") if isinstance(field, dict) else None
-            if not name or is_retired_field(field):
+            if not name or is_deleted_field(field):
                 continue
             data_type = field.get("dataType")
             self.fields[name] = field
@@ -190,14 +182,15 @@ def resolve_label(value: t.Any, items: t.Mapping[str, t.Any]) -> t.Any:
     return items.get(str(value))
 
 
-class MDAObjectStream(KeysetStream):
+class MDAObjectStream(SecondChainStream):
     """An MDA object, read with the Data Management query API.
 
     Docs: POST /v1/data/objects/query/{objectName} with select, where,
     orderBy, limit and offset. Max 5000 rows per call.
     https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Custom_Object_API/Gainsight_Custom_Object_API_Documentation
     https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Company_and_Relationship_API/Company_API_Documentation
-    Paging is keyset on (ModifiedDate, Gsid). See KeysetStream.
+    Paging is a whole-second chain on (ModifiedDate, Gsid). See
+    SecondChainStream.
     """
 
     replication_key_candidates: t.Tuple[str, ...] = ("ModifiedDate",)
@@ -219,7 +212,7 @@ class MDAObjectStream(KeysetStream):
 
         has_gsid = "Gsid" in plan.fields
         self.primary_keys = ["Gsid"] if has_gsid else []
-        # Keyset paging needs Gsid as the tie-breaker. Without it the stream
+        # The second chain needs Gsid as the tie-breaker. Without it the stream
         # is full table.
         self.replication_key = next(
             (
@@ -270,17 +263,15 @@ class MDAObjectStream(KeysetStream):
         return row
 
 
-class DeletedRecordsStream(KeysetStream):
+class DeletedRecordsStream(SecondChainStream):
     """Deleted-record log, for tombstoning. Deletes are kept for 15 days.
 
     Docs, Data Management APIs, "Retrieve Deleted Data API":
     POST /v1/data/objects/query/record_delete_log (low volume objects) and
     POST /v1/data/objects/query/record_delete_log_high_volume (high volume).
     https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Data_Management_APIs/Data_Management_APIs
-    Paging is keyset on (DeletedOn, RecordId). Filter values use the
-    documented `yyyy-MM-dd HH:mm:ss` form. The sample DeletedOn values have
-    whole seconds. If live values have milliseconds, the keyset anchor
-    check fails the stream instead of skipping rows.
+    Paging is a whole-second chain on (DeletedOn, RecordId), with the
+    documented `yyyy-MM-dd HH:mm:ss` filter form. See SecondChainStream.
     """
 
     name = "deleted_records"
@@ -304,9 +295,6 @@ class DeletedRecordsStream(KeysetStream):
             {"delete_log": "record_delete_log"},
             {"delete_log": "record_delete_log_high_volume"},
         ]
-
-    def format_cursor(self, value: datetime.datetime) -> str:
-        return format_query_datetime(value)
 
     def base_payload(self) -> t.Dict[str, t.Any]:
         return {"select": ["RecordId", "DeletedOn", "ObjectName"]}
@@ -332,20 +320,25 @@ class DeletedRecordsStream(KeysetStream):
 
 
 class CtaSlicedStream(GainsightStream):
-    """Base for the Cockpit CTA list APIs, read in ModifiedDate windows.
+    """Base for the Cockpit CTA list APIs, read in ModifiedDate day windows.
 
     The CTA list APIs page with pageNumber and pageSize, and the docs give
-    no sort order. Paging an unordered result can skip or repeat rows. So
-    the tap reads ModifiedDate windows that each fit in one page:
+    no sort order, so paging can skip or repeat rows. The tap reads
+    ModifiedDate windows that each fit in one page instead. Each window uses
+    the documented filter form: `ModifiedDate BTW [first day, last day]`
+    with `yyyy-MM-dd` values, as the CTA and Task samples show.
 
-    - The first window is one day, from the bookmark less 24 hours.
-    - A window that returns a full page is halved and read again, down to
-      one hour.
-    - A one-hour window that still fills a page is paged, with a warning.
-    - After a window under half full, the next window doubles, up to a year.
-
-    Every returned row must have a ModifiedDate inside its window. If one
-    does not, the API read the filter differently, and the stream fails.
+    - The docs do not say whether BTW includes all of the last day, or
+      only its first instant. Windows therefore overlap by one day: a
+      window ends on the day the next one starts. Either reading then
+      covers every day, and at worst a CTA arrives twice.
+    - The first window starts on the day of the bookmark less 24 hours.
+    - The shortest window is [d, d+1]. A longer window that fills a page
+      is halved and read again. A shortest window that fills a page is
+      paged, with a warning.
+    - After a window under half full, the next one doubles, up to a year.
+    - A CTA outside its window comes from a server that reads the days in
+      another time zone. It is emitted, and counted in a debug log.
     """
 
     replication_key = "ModifiedDate"
@@ -354,9 +347,7 @@ class CtaSlicedStream(GainsightStream):
     date_fields = {"CreatedDate", "ModifiedDate"}
     include_null_pass = False
 
-    first_window = datetime.timedelta(days=1)
-    min_window = datetime.timedelta(hours=1)
-    max_window = datetime.timedelta(days=366)
+    max_window_days = 366
     # The start when there is no bookmark and no start_date.
     history_start = datetime.datetime(2000, 1, 1, tzinfo=datetime.timezone.utc)
 
@@ -364,16 +355,18 @@ class CtaSlicedStream(GainsightStream):
         raise NotImplementedError
 
     def fetch_rows(self, context: t.Optional[dict]) -> t.Iterable[dict]:
-        start = self.filter_start(context) or self.history_start
-        end = utc_now() + datetime.timedelta(hours=1)
-        width = self.first_window
-        window_start = start
-        while window_start < end:
-            window_end = min(window_start + width, end)
-            token = {"mode": "window", "start": window_start, "end": window_end, "page": 1}
+        first_day = (self.filter_start(context) or self.history_start).date()
+        # Tomorrow, so a tenant time zone ahead of UTC is covered.
+        last_day = (utc_now() + datetime.timedelta(days=1)).date()
+        width = 1
+        day = first_day
+        while day <= last_day:
+            end = min(day + datetime.timedelta(days=width), last_day + datetime.timedelta(days=1))
+            token = {"mode": "window", "first": day, "last": end, "page": 1}
             rows = self.post_page(context, token)
-            if len(rows) >= self.page_size and window_end - window_start > self.min_window:
-                width = max((window_end - window_start) / 2, self.min_window)
+            span = (end - day).days
+            if len(rows) >= self.page_size and span > 1:
+                width = max(span // 2, 1)
                 continue
             if len(rows) >= self.page_size:
                 self.logger.warning(
@@ -382,21 +375,21 @@ class CtaSlicedStream(GainsightStream):
                     "order, so a CTA edited during the sync can be missed "
                     "until the next run.",
                     self.name,
-                    window_start.isoformat(),
-                    window_end.isoformat(),
+                    day.isoformat(),
+                    end.isoformat(),
                 )
             count = 0
             while True:
-                self._check_window(rows, window_start, window_end)
+                self._count_outside(rows, day, end)
                 count += len(rows)
                 yield from rows
                 if len(rows) < self.page_size:
                     break
                 token = {**token, "page": token["page"] + 1}
                 rows = self.post_page(context, token)
-            window_start = window_end
+            day = end
             if count < self.page_size // 2:
-                width = min(width * 2, self.max_window)
+                width = min(width * 2, self.max_window_days)
         if self.include_null_pass:
             page = 1
             while True:
@@ -406,19 +399,24 @@ class CtaSlicedStream(GainsightStream):
                     break
                 page += 1
 
-    def _check_window(
-        self, rows: t.List[dict], start: datetime.datetime, end: datetime.datetime
+    def _count_outside(
+        self, rows: t.List[dict], first: datetime.date, last: datetime.date
     ) -> None:
+        outside = 0
         for row in rows:
             moment = parse_api_datetime(row.get("ModifiedDate"))
-            if moment is not None and not start <= moment < end:
-                raise FatalAPIError(
-                    f"{self.name}: CTA {row.get('Gsid')} has ModifiedDate "
-                    f"{row.get('ModifiedDate')}, outside the requested window "
-                    f"{start.isoformat()} to {end.isoformat()}. The API may read "
-                    "the filter in another time zone. Stopping so no rows are "
-                    "skipped."
-                )
+            if moment is not None and not first <= moment.date() <= last:
+                outside += 1
+        if outside:
+            self.logger.debug(
+                "%s: %d CTA(s) outside the window %s to %s. The API may read "
+                "the days in another time zone. They are emitted, and may be "
+                "duplicates.",
+                self.name,
+                outside,
+                first.isoformat(),
+                last.isoformat(),
+            )
 
     def prepare_request_payload(
         self,
@@ -428,33 +426,21 @@ class CtaSlicedStream(GainsightStream):
         token = next_page_token or {"mode": "nulls", "page": 1}
         payload: t.Dict[str, t.Any] = {"select": self.select_list()}
         if token["mode"] == "window":
-            conditions = [
-                {
-                    "fieldName": "ModifiedDate",
-                    "value": [format_api_datetime(token["start"])],
-                    "alias": "A",
-                    "operator": "GTE",
-                },
-                {
-                    "fieldName": "ModifiedDate",
-                    "value": [format_api_datetime(token["end"])],
-                    "alias": "B",
-                    "operator": "LT",
-                },
-            ]
-            payload["where"] = {"conditions": conditions, "expression": "A AND B"}
-        else:
-            payload["where"] = {
-                "conditions": [
-                    {
-                        "fieldName": "ModifiedDate",
-                        "value": [],
-                        "alias": "A",
-                        "operator": "IS_NULL",
-                    }
-                ],
-                "expression": "A",
+            condition = {
+                "fieldName": "ModifiedDate",
+                "value": [token["first"].isoformat(), token["last"].isoformat()],
+                "alias": "A",
+                "operator": "BTW",
             }
+        else:
+            # Documented in the Fetch CTA "Is Null" filter sample.
+            condition = {
+                "fieldName": "ModifiedDate",
+                "value": [],
+                "alias": "A",
+                "operator": "IS_NULL",
+            }
+        payload["where"] = {"conditions": [condition], "expression": "A"}
         payload["pageSize"] = self.page_size
         payload["pageNumber"] = token["page"]
         return payload
@@ -535,7 +521,7 @@ class CtaStream(CtaSlicedStream):
         date_fields = set(type(self).date_fields)
         for field in custom_fields or []:
             name = field.get("fieldName")
-            if not name or name in properties or is_retired_field(field):
+            if not name or name in properties or is_deleted_field(field):
                 continue
             properties[name] = json_schema_for(field.get("dataType"))
             self.select_map[name] = name
@@ -568,6 +554,8 @@ class CtaDeletedStream(CtaSlicedStream):
 
     name = "cta_deleted"
     path = "/v2/cockpit/cta/deleted/list"
+    # No null pass: the Retrieve Deleted Data samples show no IS_NULL filter.
+    # A deleted CTA with a null ModifiedDate is not read.
     date_fields = {"ModifiedDate"}
 
     # Documented request: "select": ["name", "Comments", "CompanyId", "ModifiedDate"].

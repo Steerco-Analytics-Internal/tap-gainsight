@@ -51,7 +51,7 @@ def company(i: int, modified=_DEFAULT) -> dict:
 
 
 def serve_company(api, rows, **kwargs) -> QueryEngine:
-    return api.serve(query_url("company"), QueryEngine(rows, {"ModifiedDate", "CreatedDate"}, **kwargs))
+    return api.serve(query_url("Company"), QueryEngine(rows, {"ModifiedDate", "CreatedDate"}, **kwargs))
 
 
 def serve_empty_delete_logs(api):
@@ -82,12 +82,12 @@ def gsobj_1011_body() -> dict:
 
 @pytest.mark.parametrize("body", [load("company_query_no_data_response.json"), gsobj_1011_body()])
 def test_f1_empty_reply_at_http_400_is_an_empty_page(api, body):
-    api.mocker.post(query_url("company"), status_code=400, json=body)
+    api.mocker.post(query_url("Company"), status_code=400, json=body)
     assert list(make_tap().streams["Company"].get_records(None)) == []
 
 
 def test_f1_gsobj_1011_wording_at_http_200_is_an_empty_page(api):
-    api.mocker.post(query_url("company"), json=gsobj_1011_body())
+    api.mocker.post(query_url("Company"), json=gsobj_1011_body())
     assert list(make_tap().streams["Company"].get_records(None)) == []
 
 
@@ -116,16 +116,17 @@ def test_f2_a_row_changed_between_pages_does_not_hide_another_row(api, change):
     assert expected <= got
 
 
-def test_f2_keyset_uses_the_documented_expression_syntax(api):
+def test_f2_later_pages_filter_instead_of_using_an_offset(api):
+    # Superseded in form by the delta review (N2): the chain uses AND only.
     engine = serve_company(api, [company(i) for i in range(1, 4)])
     stream = make_tap().streams["Company"]
     stream.page_size = 2
     list(stream.get_records(None))
     second = engine.bodies[1]
     assert second["offset"] == 0
-    assert second["where"]["expression"] == "A OR (B AND C)"
+    assert second["where"]["expression"] == "A AND B"
     ops = [(c["name"], c["operator"]) for c in second["where"]["conditions"]]
-    assert ops == [("ModifiedDate", "GT"), ("ModifiedDate", "EQ"), ("Gsid", "GTE")]
+    assert ops == [("ModifiedDate", "GTE"), ("ModifiedDate", "LT")]
 
 
 # Finding 3: deleted CTAs are never tombstoned.
@@ -183,7 +184,7 @@ def test_f5_mda_filter_looks_back_24_hours(api):
     make_tap(start_date="2024-01-02T00:00:00Z").streams["Company"].sync()
     condition = engine.bodies[0]["where"]["conditions"][0]
     assert condition["operator"] == "GTE"
-    assert condition["value"] == ["2024-01-01T00:00:00.000+0000"]
+    assert condition["value"] == ["2024-01-01 00:00:00"]
 
 
 def test_f5_delete_log_filter_looks_back_24_hours(api):
@@ -207,40 +208,44 @@ def cta_rows(moments):
     return rows
 
 
-def slice_bounds(body):
-    conditions = {c["operator"]: c["value"][0] for c in body["where"]["conditions"] if c["value"]}
-    return conditions.get("GTE"), conditions.get("LT")
+def window_spans(engine):
+    spans = []
+    for body in engine.bodies:
+        values = body["where"]["conditions"][0]["value"]
+        if len(values) == 2:
+            first, last = (datetime.date.fromisoformat(v) for v in values)
+            spans.append((last - first).days)
+    return spans
 
 
-def test_f6_cta_windows_are_halved_until_each_fits_one_page(api):
-    day = (now() - datetime.timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
-    rows = cta_rows([day + datetime.timedelta(hours=h) for h in range(0, 24, 3)])
+def test_f6_cta_windows_are_halved_until_each_fits_one_page(api, capsys):
+    # Day windows since the delta review (N1). Runs through sync() so the
+    # start_date applies.
+    day = (now() - datetime.timedelta(days=8)).replace(hour=0, minute=0, second=0, microsecond=0)
+    rows = cta_rows([day + datetime.timedelta(days=d, hours=h) for d in range(4) for h in (6, 18)])
     engine = api.serve(CTA_URL, QueryEngine(rows, {"ModifiedDate"}, unordered=True))
-    tap = make_tap(start_date=iso_z(day))
-    stream = tap.streams["cta"]
+    stream = make_tap(start_date=iso_z(day)).streams["cta"]
     stream.page_size = 3
-    got = [r["Gsid"] for r in stream.get_records(None)]
+    stream.sync()
+    got = [json.loads(line)["record"]["Gsid"] for line in capsys.readouterr().out.splitlines() if '"RECORD"' in line]
     assert sorted(got) == sorted(r["Gsid"] for r in rows)
     assert len(got) == len(set(got))
-    widths = []
-    for body in engine.bodies:
-        start, end = slice_bounds(body)
-        if start and end:
-            widths.append(datetime.datetime.strptime(end, "%Y-%m-%dT%H:%M:%S.%f%z") - datetime.datetime.strptime(start, "%Y-%m-%dT%H:%M:%S.%f%z"))
-    assert widths[0] == datetime.timedelta(days=1)
-    assert min(widths) < datetime.timedelta(days=1)
-    assert min(widths) >= datetime.timedelta(hours=1)
+    spans = window_spans(engine)
+    assert spans[0] == 1
+    assert any(spans[i] < spans[i - 1] for i in range(1, len(spans)))
+    assert min(spans) >= 1
 
 
-def test_f6_an_overflowing_minimum_slice_is_paged_with_a_warning(api, caplog):
+def test_f6_an_overflowing_minimum_window_is_paged_with_a_warning(api, capsys, caplog):
     capture(caplog)
     moment = (now() - datetime.timedelta(days=1)).replace(minute=0, second=0, microsecond=0)
     rows = cta_rows([moment + datetime.timedelta(minutes=m) for m in range(5)])
     api.serve(CTA_URL, QueryEngine(rows, {"ModifiedDate"}))
     stream = make_tap(start_date=iso_z(moment)).streams["cta"]
     stream.page_size = 2
-    got = [r["Gsid"] for r in stream.get_records(None)]
-    assert sorted(got) == sorted(r["Gsid"] for r in rows)
+    stream.sync()
+    got = [json.loads(line)["record"]["Gsid"] for line in capsys.readouterr().out.splitlines() if '"RECORD"' in line]
+    assert sorted(set(got)) == sorted(r["Gsid"] for r in rows)
     assert "more CTAs than one page" in caplog.text
 
 
@@ -307,7 +312,7 @@ def test_f9_cta_selects_the_company_name(api):
 
 
 def test_f10_a_query_redirect_is_not_followed(api):
-    api.mocker.post(query_url("company"), status_code=302, headers={"Location": "https://evil.example.com/steal"})
+    api.mocker.post(query_url("Company"), status_code=302, headers={"Location": "https://evil.example.com/steal"})
     api.mocker.register_uri(requests_mock_lib.ANY, "https://evil.example.com/steal", json=query_page([]))
     with pytest.raises(FatalAPIError, match="evil.example.com"):
         list(make_tap().streams["Company"].get_records(None))
@@ -334,16 +339,18 @@ def test_h_describe_and_query_use_names_exactly_as_listed(api):
     assert engine.bodies
 
 
-def test_h_hidden_and_deleted_fields_are_left_out(api):
+def test_h_deleted_fields_are_left_out_and_hidden_fields_kept(api):
+    # Hidden fields stay since the delta review (N4).
     fields = api.describes["company"]["fields"]
     fields.append(doc_field("Name__gc", "company", fieldName="Old_Field__gc", meta={"hidden": True}))
     fields.append(doc_field("Name__gc", "company", fieldName="Gone_Field__gc", meta={"deleted": True}))
     engine = serve_company(api, [])
     stream = make_tap().streams["Company"]
-    assert "Old_Field__gc" not in stream.schema["properties"]
+    assert "Old_Field__gc" in stream.schema["properties"]
     assert "Gone_Field__gc" not in stream.schema["properties"]
     stream.sync()
-    assert not {"Old_Field__gc", "Gone_Field__gc"} & set(engine.bodies[0]["select"])
+    assert "Old_Field__gc" in engine.bodies[0]["select"]
+    assert "Gone_Field__gc" not in engine.bodies[0]["select"]
 
 
 def test_h_high_volume_log_that_does_not_exist_counts_as_empty(api, capsys):

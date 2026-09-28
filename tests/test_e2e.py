@@ -51,7 +51,7 @@ def test_discover_then_sync_with_catalog_and_state(api, tmp_path):
     rows = [company_row(5), company_row(9)]
     rows[0]["Health_Notes__gc"] = "Renewal looks safe"
     rows[0]["Is_Active__gc"] = True
-    company = api.serve(query_url("company"), QueryEngine(rows, {"ModifiedDate"}))
+    company = api.serve(query_url("Company"), QueryEngine(rows, {"ModifiedDate"}))
     api.serve(query_url("activity_timeline"), QueryEngine([timeline_row(1)], {"ModifiedDate"}, shape="records"))
     api.serve(f"{BASE_URL}/v2/cockpit/cta/list", QueryEngine([cta_row(3)], {"ModifiedDate"}, unordered=True))
     api.serve(f"{BASE_URL}/v2/cockpit/cta/deleted/list", QueryEngine([cta_deleted_row(2)], {"ModifiedDate"}, unordered=True))
@@ -86,15 +86,15 @@ def test_discover_then_sync_with_catalog_and_state(api, tmp_path):
 
     # The query used the bookmark less 24 hours, and selected the custom field.
     body = company.bodies[0]
-    assert body["where"]["conditions"][0]["value"] == ["2024-02-04T08:24:35.253+0000"]
+    assert body["where"]["conditions"][0]["value"] == ["2024-02-04 08:24:35"]
     assert "Health_Notes__gc" in body["select"] and "Is_Active__gc" not in body["select"]
 
     # Bookmarks advance.
     bookmarks = messages[-1]["value"]["bookmarks"]
     assert bookmarks["Company"]["replication_key_value"] == "2024-02-05T08:24:44.253000+00:00"
     assert bookmarks["timeline"]["replication_key_value"] == "2024-02-05T08:24:36.253000+00:00"
-    assert bookmarks["cta"]["replication_key_value"] == "2024-02-05T11:24:35.253Z"
-    assert bookmarks["cta_deleted"]["replication_key_value"] == "2024-02-05T10:24:35.253Z"
+    assert bookmarks["cta"]["replication_key_value"] == "2024-02-08T08:24:35.253Z"
+    assert bookmarks["cta_deleted"]["replication_key_value"] == "2024-02-07T08:24:35.253Z"
     delete_partitions = {
         p["context"]["delete_log"]: p.get("replication_key_value")
         for p in bookmarks["deleted_records"]["partitions"]

@@ -317,19 +317,6 @@ def as_utc(value: datetime.datetime) -> datetime.datetime:
     return plain.astimezone(datetime.timezone.utc)
 
 
-def format_api_datetime(value: datetime.datetime) -> str:
-    """Format a DATETIME filter value with milliseconds and a UTC offset.
-
-    Uses `yyyy-MM-dd'T'HH:mm:ss.SSSZ`, the DateTime format in the Timeline
-    APIs page, for example `2026-04-14T10:30:00.000+0000`. The explicit
-    offset leaves no time zone to guess, and milliseconds let a keyset
-    cursor match a row exactly.
-    """
-    moment = as_utc(value)
-    millis = moment.microsecond // 1000
-    return moment.strftime("%Y-%m-%dT%H:%M:%S.") + f"{millis:03d}+0000"
-
-
 def format_query_datetime(value: datetime.datetime) -> str:
     """Format a DATETIME filter value for the query API.
 
@@ -665,16 +652,6 @@ class GainsightStream(RESTStream):
         self.update_sync_costs(prepared, response, context)
         return list(self.parse_response(response))
 
-    def offset_rows(self, context: t.Optional[dict], mode: str) -> t.Iterable[dict]:
-        """Page with `offset` until a page is short."""
-        offset = 0
-        while True:
-            rows = self.post_page(context, {"mode": mode, "offset": offset})
-            yield from rows
-            if len(rows) < self.page_size:
-                return
-            offset += self.page_size
-
     def filter_start(self, context: t.Optional[dict]) -> t.Optional[datetime.datetime]:
         """Return the bookmark or start_date, less FILTER_LOOKBACK."""
         if not self.replication_key:
@@ -725,30 +702,35 @@ class GainsightStream(RESTStream):
             )
 
 
-class KeysetStream(GainsightStream):
-    """A query-API stream paged by keyset on (replication key, tie-breaker).
+class SecondChainStream(GainsightStream):
+    """A query-API stream read as a chain of whole seconds.
 
     Offset paging over a sort on ModifiedDate skips a row whenever an
-    earlier row is edited or deleted between pages. Keyset paging asks for
-    the rows after the last one seen instead:
+    earlier row is edited or deleted between pages. This chain asks for
+    rows after a point instead, with only documented request forms:
+    AND-joined conditions and `yyyy-MM-dd HH:mm:ss` values in UTC.
 
-        A OR (B AND C)
-        A: <key> GT x    B: <key> EQ x    C: <tie-breaker> GTE g
+    1. Scan: read `key GTE L` (or `key IS_NOT_NULL` on a first run),
+       ordered by (key, tie-breaker). Every row in a second before the
+       page's last second is complete, so those rows are emitted.
+    2. Drain: read the page's last second s with
+       `key GTE s AND key LT s+1s AND tie-breaker GT g`, ordered by the
+       tie-breaker, until a page is short. This is the one extension
+       beyond the documented two-term `A AND B`.
+    3. Set L to s+1s and scan again.
 
-    `GTE` keeps the last row (the anchor) in the next page. When it is
-    there, it is dropped. When it is missing, the tap reads that row by its
-    tie-breaker. If the row still has the value x, the API did not match the
-    cursor value, and the stream fails instead of skipping rows.
+    The scan page listed rows in second s. If the drain returns none of
+    them, the tap reads the first such row by its tie-breaker. If it still
+    has a value in second s, the API read the filter in another time zone
+    or grain, and the stream fails instead of skipping rows. Rows a coarse
+    server returns outside the range asked for are duplicates. They are
+    dropped and counted in a debug log.
 
-    After the keyset pass, a second pass reads rows whose key is null, with
-    offset paging sorted by the tie-breaker. A stream with no replication
-    key uses offset paging sorted by the tie-breaker.
+    A last pass reads rows whose key is null. Streams with no replication
+    key read by tie-breaker: `tie-breaker GT g`, ordered by the tie-breaker.
     """
 
     tiebreaker = "Gsid"
-
-    def format_cursor(self, value: datetime.datetime) -> str:
-        return format_api_datetime(value)
 
     def base_payload(self) -> t.Dict[str, t.Any]:
         raise NotImplementedError
@@ -756,65 +738,7 @@ class KeysetStream(GainsightStream):
     def can_sort_by_tiebreaker(self) -> bool:
         return True
 
-    def fetch_rows(self, context: t.Optional[dict]) -> t.Iterable[dict]:
-        if not self.replication_key:
-            yield from self.offset_rows(context, "offset")
-            return
-        cursor: t.Optional[t.Tuple[int, str]] = None
-        while True:
-            rows = self.post_page(context, {"mode": "keyset", "cursor": cursor})
-            full = len(rows) >= self.page_size
-            if cursor is not None:
-                rows = self._without_anchor(context, rows, cursor)
-            next_cursor = self._cursor_of(rows[-1]) if full and rows else None
-            yield from rows
-            if not full:
-                break
-            if next_cursor is None or next_cursor == cursor:
-                raise FatalAPIError(
-                    f"{self.name}: keyset paging made no progress at {cursor}. "
-                    "Use a page size of 2 or more."
-                )
-            cursor = next_cursor
-        yield from self.offset_rows(context, "nulls")
-
-    def _cursor_of(self, row: dict) -> t.Tuple[int, str]:
-        value = to_epoch_ms(row.get(self.replication_key))
-        key = row.get(self.tiebreaker)
-        if value is None or key is None:
-            raise FatalAPIError(
-                f"{self.name}: a keyset row lacks {self.replication_key} or "
-                f"{self.tiebreaker}: {str(row)[:BODY_EXCERPT_LENGTH]}"
-            )
-        return value, str(key)
-
-    def _is_row(self, row: dict, cursor: t.Tuple[int, str]) -> bool:
-        return (
-            to_epoch_ms(row.get(self.replication_key)) == cursor[0]
-            and str(row.get(self.tiebreaker)) == cursor[1]
-        )
-
-    def _without_anchor(
-        self, context: t.Optional[dict], rows: t.List[dict], cursor: t.Tuple[int, str]
-    ) -> t.List[dict]:
-        kept = [row for row in rows if not self._is_row(row, cursor)]
-        if len(kept) < len(rows):
-            return kept
-        probe = self.post_page(context, {"mode": "probe", "tiebreak": cursor[1]})
-        if probe and to_epoch_ms(probe[0].get(self.replication_key)) == cursor[0]:
-            raise FatalAPIError(
-                f"{self.name}: the API did not match the keyset cursor "
-                f"{self.replication_key} = {self.format_cursor(parse_api_datetime(cursor[0]))}, "
-                f"although row {self.tiebreaker} {cursor[1]} still has that "
-                "value. It may read the DateTime filter format or time zone "
-                "differently. Stopping so no rows are skipped."
-            )
-        return rows
-
-    def where(self, conditions: t.List[dict], expression: str) -> dict:
-        for alias, condition in zip("ABCDEFGH", conditions):
-            condition["alias"] = alias
-        return {"conditions": conditions, "expression": expression}
+    # Request building
 
     def condition(self, name: str, operator: str, value: t.List[t.Any]) -> dict:
         return {"name": name, "alias": "", "value": value, "operator": operator}
@@ -822,44 +746,162 @@ class KeysetStream(GainsightStream):
     def prepare_request_payload(
         self, context: t.Optional[dict], next_page_token: t.Optional[dict]
     ) -> dict:
-        token = next_page_token or {"mode": "offset", "offset": 0}
-        mode = token["mode"]
-        rk, tb = self.replication_key, self.tiebreaker
+        token = next_page_token or {}
         payload = self.base_payload()
-        order: t.Dict[str, str] = {}
-        if mode == "keyset":
-            cursor = token.get("cursor")
-            if cursor is not None:
-                value = self.format_cursor(parse_api_datetime(cursor[0]))
-                payload["where"] = self.where(
-                    [
-                        self.condition(rk, "GT", [value]),
-                        self.condition(rk, "EQ", [value]),
-                        self.condition(tb, "GTE", [cursor[1]]),
-                    ],
-                    "A OR (B AND C)",
-                )
-            else:
-                start = self.filter_start(context)
-                if start:
-                    first = self.condition(rk, "GTE", [self.format_cursor(start)])
-                else:
-                    first = self.condition(rk, "IS_NOT_NULL", [])
-                payload["where"] = self.where([first], "A")
-            order = {rk: "asc", tb: "asc"}
-        elif mode == "nulls":
-            payload["where"] = self.where([self.condition(rk, "IS_NULL", [])], "A")
-            order = {tb: "asc"}
-        elif mode == "probe":
-            payload["select"] = [tb, rk]
-            payload["where"] = self.where(
-                [self.condition(tb, "EQ", [token["tiebreak"]])], "A"
-            )
-        elif self.can_sort_by_tiebreaker():
-            order = {tb: "asc"}
-        if order:
-            payload["orderBy"] = order
-        payload["limit"] = 1 if mode == "probe" else self.page_size
+        if token.get("select"):
+            payload["select"] = token["select"]
+        conditions = [dict(c) for c in token.get("conditions") or []]
+        if conditions:
+            for alias, condition in zip("ABCDEFGH", conditions):
+                condition["alias"] = alias
+            payload["where"] = {
+                "conditions": conditions,
+                "expression": " AND ".join(c["alias"] for c in conditions),
+            }
+        if token.get("order"):
+            payload["orderBy"] = token["order"]
+        payload["limit"] = self.page_size
         payload["offset"] = token.get("offset", 0)
         return payload
 
+    # Paging
+
+    def _second(self, row: dict) -> t.Optional[datetime.datetime]:
+        moment = parse_api_datetime(row.get(self.replication_key))
+        return moment.replace(microsecond=0) if moment else None
+
+    def _tiebreak(self, row: dict) -> str:
+        value = row.get(self.tiebreaker)
+        if value is None:
+            raise FatalAPIError(
+                f"{self.name}: a row lacks {self.tiebreaker}, which paging "
+                f"needs: {str(row)[:BODY_EXCERPT_LENGTH]}"
+            )
+        return str(value)
+
+    def fetch_rows(self, context: t.Optional[dict]) -> t.Iterable[dict]:
+        if not self.replication_key:
+            yield from self.tiebreak_rows(context, [])
+            return
+        rk, tb = self.replication_key, self.tiebreaker
+        lower = self.filter_start(context)
+        lower = lower.replace(microsecond=0) if lower else None
+        while True:
+            if lower is None:
+                first = self.condition(rk, "IS_NOT_NULL", [])
+            else:
+                first = self.condition(rk, "GTE", [format_query_datetime(lower)])
+            page = self.post_page(
+                context,
+                {"conditions": [first], "order": {rk: "asc", tb: "asc"}},
+            )
+            kept = [
+                row
+                for row in page
+                if self._second(row) is not None
+                and (lower is None or self._second(row) >= lower)
+            ]
+            self._log_duplicates(len(page) - len(kept))
+            if len(page) < self.page_size:
+                yield from kept
+                break
+            if not kept:
+                raise FatalAPIError(
+                    f"{self.name}: a full page from {rk} GTE "
+                    f"{format_query_datetime(lower) if lower else 'the start'} "
+                    "had no row at or after that value. The API may read the "
+                    "filter at a coarser grain. Stopping so no rows are skipped."
+                )
+            last = self._second(kept[-1])
+            assert last is not None
+            known = [row for row in kept if self._second(row) == last]
+            done = [row for row in kept if self._second(row) < last]
+            yield from done
+            yield from self._drain_second(context, last, known)
+            lower = last + datetime.timedelta(seconds=1)
+        yield from self.tiebreak_rows(context, [self.condition(rk, "IS_NULL", [])])
+
+    def _drain_second(
+        self, context: t.Optional[dict], second: datetime.datetime, known: t.List[dict]
+    ) -> t.Iterable[dict]:
+        rk, tb = self.replication_key, self.tiebreaker
+        bounds = [
+            self.condition(rk, "GTE", [format_query_datetime(second)]),
+            self.condition(
+                rk, "LT", [format_query_datetime(second + datetime.timedelta(seconds=1))]
+            ),
+        ]
+        known_id = self._tiebreak(known[0]) if known else None
+        found = 0
+        after: t.Optional[str] = None
+        while True:
+            conditions = bounds + ([self.condition(tb, "GT", [after])] if after else [])
+            rows = self.post_page(context, {"conditions": conditions, "order": {tb: "asc"}})
+            next_after = self._tiebreak(rows[-1]) if rows else None
+            in_second = [row for row in rows if self._second(row) == second]
+            self._log_duplicates(len(rows) - len(in_second))
+            found += len(in_second)
+            yield from in_second
+            if len(rows) < self.page_size:
+                break
+            after = next_after
+        if found == 0 and known_id is not None:
+            self._check_row_moved(context, known_id, second)
+
+    def _check_row_moved(
+        self, context: t.Optional[dict], row_id: str, second: datetime.datetime
+    ) -> None:
+        rk, tb = self.replication_key, self.tiebreaker
+        rows = self.post_page(
+            context,
+            {
+                "select": [tb, rk],
+                "conditions": [self.condition(tb, "EQ", [row_id])],
+                "order": {rk: "asc"},
+            },
+        )
+        if any(self._second(row) == second for row in rows):
+            raise FatalAPIError(
+                f"{self.name}: the API did not return the rows it listed for "
+                f"{rk} {format_query_datetime(second)}, although row {tb} "
+                f"{row_id} still has that value. It may read the filter in "
+                "another time zone or at a coarser grain. Stopping so no rows "
+                "are skipped."
+            )
+
+    def tiebreak_rows(
+        self, context: t.Optional[dict], base: t.List[dict]
+    ) -> t.Iterable[dict]:
+        """Read rows matching `base`, paged by `tie-breaker GT g`."""
+        tb = self.tiebreaker
+        if not self.can_sort_by_tiebreaker():
+            yield from self.offset_rows(context, base)
+            return
+        after: t.Optional[str] = None
+        while True:
+            conditions = base + ([self.condition(tb, "GT", [after])] if after else [])
+            rows = self.post_page(context, {"conditions": conditions, "order": {tb: "asc"}})
+            full = len(rows) >= self.page_size
+            after = self._tiebreak(rows[-1]) if full else None
+            yield from rows
+            if not full:
+                return
+
+    def offset_rows(self, context: t.Optional[dict], base: t.List[dict]) -> t.Iterable[dict]:
+        """Page with `offset` when the tie-breaker cannot be sorted on."""
+        offset = 0
+        while True:
+            rows = self.post_page(context, {"conditions": base, "offset": offset})
+            yield from rows
+            if len(rows) < self.page_size:
+                return
+            offset += self.page_size
+
+    def _log_duplicates(self, count: int) -> None:
+        if count:
+            self.logger.debug(
+                "%s: dropped %d row(s) outside the range asked for. They are "
+                "duplicates of rows read elsewhere.",
+                self.name,
+                count,
+            )

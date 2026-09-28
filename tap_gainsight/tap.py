@@ -17,15 +17,18 @@ from tap_gainsight.streams import (
     CtaDeletedStream,
     CtaStream,
     DeletedRecordsStream,
+    LABEL_SUFFIX,
     MDAObjectStream,
     ObjectPlan,
     picklist_category_id,
     picklist_items,
 )
 
-# Objects are keyed by lowercase name. Calls use the name exactly as the
-# object list returns it, such as "company". These standard objects keep
-# the names the API pages use as their stream names.
+# Objects are keyed by lowercase name. Describe calls use the name exactly
+# as the object list returns it, such as "company". Query paths and stream
+# names for these documented standard objects use the documented casing:
+# the Company API page queries /v1/data/objects/query/Company. Every other
+# object uses its listed name in both.
 CANONICAL_NAMES = {
     "company": "Company",
     "company_person": "Company_Person",
@@ -87,6 +90,10 @@ class TapGainsight(Tap):
     ).to_dict()
 
     _rate_limiter: t.Optional[RateLimiter] = None
+    # Discovery failures in this run, used by the catalog check.
+    _failed_objects: t.Set[str] = set()
+    _failed_dropdowns: t.Set[str] = set()
+    _stream_objects: t.Dict[str, str] = {}
 
     @property
     def rate_limiter(self) -> RateLimiter:
@@ -149,6 +156,7 @@ class TapGainsight(Tap):
     def _drop_or_raise(
         self, name: str, exc: Exception, required: t.Set[str]
     ) -> None:
+        self._failed_objects = self._failed_objects | {name.lower()}
         if name.lower() in required:
             raise GainsightAPIError(
                 f"Discovery failed for required object {name}: {exc}"
@@ -177,10 +185,13 @@ class TapGainsight(Tap):
                     self.logger.warning(
                         "No labels for dropdown category %s: %s", category, exc
                     )
+                    self._failed_dropdowns = self._failed_dropdowns | {category}
                     dropdowns[category] = {}
         return dropdowns
 
     def discover_streams(self) -> t.List[Stream]:
+        self._failed_objects = set()
+        self._failed_dropdowns = set()
         client = self.metadata_client()
         listed = client.list_objects()
 
@@ -219,6 +230,12 @@ class TapGainsight(Tap):
         if CTA_OBJECT in listed_names:
             to_describe.setdefault(CTA_OBJECT, listed_names[CTA_OBJECT])
 
+        # Stream name -> object key, for the catalog check.
+        self._stream_objects = {
+            CANONICAL_NAMES.get(key, name): key for key, name in stream_objects.items()
+        }
+        self._stream_objects.update({"timeline": TIMELINE_OBJECT, "cta": CTA_OBJECT})
+
         described = self._describe_all(
             client, list(to_describe.values()), required={REQUIRED_OBJECT}
         )
@@ -252,7 +269,10 @@ class TapGainsight(Tap):
                 continue
             streams.append(
                 MDAObjectStream(
-                    self, name, plan, name=CANONICAL_NAMES.get(key, name)
+                    self,
+                    CANONICAL_NAMES.get(key, name),
+                    plan,
+                    name=CANONICAL_NAMES.get(key, name),
                 )
             )
 
@@ -283,45 +303,75 @@ class TapGainsight(Tap):
         return streams
 
     def _check_input_catalog(self, streams: t.List[Stream]) -> None:
-        """Raise when the input catalog selects what discovery cannot produce.
+        """Compare the input catalog with this run's discovery.
 
-        Discovery runs again at sync time. A stream or column can drop out
-        between runs, for example when a describe or dropdown call fails. The
-        SDK would then skip it without a word, so this check fails the run
-        and names what is missing.
+        Discovery runs again at sync time. When a selected stream or column
+        is missing because a describe, dropdown or lookup-target call failed
+        in this run, the run fails and names it, because the SDK would skip
+        it without a word. When it is missing because Gainsight no longer
+        has it, such as a field an admin deleted, the tap logs a warning and
+        syncs the rest.
         """
         catalog = self.input_catalog
         if not catalog:
             return
         produced = {stream.name: stream for stream in streams}
-        missing_streams: t.List[str] = []
-        missing_columns: t.List[str] = []
+        failed: t.List[str] = []
+        gone: t.List[str] = []
         for stream_id, entry in catalog.items():
             selection = entry.metadata.resolve_selection()
             if not selection.get((), False):
                 continue
             stream = produced.get(stream_id)
             if stream is None:
-                missing_streams.append(stream_id)
+                key = self._stream_objects.get(stream_id, stream_id.lower())
+                (failed if key in self._failed_objects else gone).append(stream_id)
                 continue
             schema = entry.schema.to_dict() if entry.schema else {}
             available = stream.schema.get("properties", {})
             for column in schema.get("properties", {}):
-                if selection.get(("properties", column), False) and column not in available:
-                    missing_columns.append(f"{stream_id}.{column}")
-        if missing_streams or missing_columns:
-            parts = []
-            if missing_streams:
-                parts.append(f"streams {', '.join(sorted(missing_streams))}")
-            if missing_columns:
-                parts.append(f"columns {', '.join(sorted(missing_columns))}")
+                if not selection.get(("properties", column), False) or column in available:
+                    continue
+                name = f"{stream_id}.{column}"
+                (failed if self._lost_to_failure(stream, column) else gone).append(name)
+        if gone:
+            self.logger.warning(
+                "The catalog selects %s, which Gainsight no longer has. Syncing "
+                "the rest. Run discovery again to update the catalog.",
+                ", ".join(sorted(gone)),
+            )
+        if failed:
             raise GainsightAPIError(
                 "The catalog selects "
-                + " and ".join(parts)
-                + ", but discovery could not produce them. Check the warnings "
-                "above for failed describe or dropdown calls, or run discovery "
-                "again and update the catalog."
+                + ", ".join(sorted(failed))
+                + ", but a metadata call failed in this run, so discovery could "
+                "not produce them. Check the warnings above for failed describe "
+                "or dropdown calls, and run the tap again."
             )
+
+    def _lost_to_failure(self, stream: Stream, column: str) -> bool:
+        """Return True when a metadata failure in this run removed `column`."""
+        if isinstance(stream, CtaStream):
+            return CTA_OBJECT in self._failed_objects
+        plan = getattr(stream, "plan", None)
+        if plan is None:
+            return False
+        if column.endswith(LABEL_SUFFIX):
+            field = plan.fields.get(column[: -len(LABEL_SUFFIX)])
+            return bool(field) and picklist_category_id(field) in self._failed_dropdowns
+        if "__gr." in column:
+            lookup = column.split(".", 1)[0]
+            for field in plan.fields.values():
+                meta = field.get("meta") if isinstance(field.get("meta"), dict) else {}
+                detail = meta.get("lookupDetail") or {}
+                if detail.get("lookupName") != lookup:
+                    continue
+                targets = {
+                    str((target or {}).get("objectName", "")).lower()
+                    for target in detail.get("lookupObjects") or []
+                }
+                return bool(targets & self._failed_objects)
+        return False
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ CTA_URL = f"{BASE_URL}/v2/cockpit/cta/list"
 CTA_DELETED_URL = f"{BASE_URL}/v2/cockpit/cta/deleted/list"
 T0 = 1707121475253  # 2024-02-05T08:24:35.253Z in epoch milliseconds.
 UTC = datetime.timezone.utc
+DAY_MS = 86_400_000
 DEFAULT: t.Any = object()
 
 
@@ -57,14 +58,14 @@ def cta_row(i: int, modified: t.Any = DEFAULT) -> dict:
     """The documented Fetch CTA record, with a ModifiedDate like the deleted-CTA sample."""
     row = copy.deepcopy(load("cta_list_response.json")["data"][0])
     row["Gsid"] = f"1S01CTA{i:04d}"
-    row["ModifiedDate"] = iso_ms(T0 + i * 3_600_000) if modified is DEFAULT else modified
+    row["ModifiedDate"] = iso_ms(T0 + i * DAY_MS) if modified is DEFAULT else modified
     return row
 
 
 def cta_deleted_row(i: int, modified: t.Any = DEFAULT) -> dict:
     row = copy.deepcopy(load("cta_deleted_list_response.json")["data"][0])
     row["Gsid"] = f"1S01DELCTA{i:04d}"
-    row["ModifiedDate"] = iso_ms(T0 + i * 3_600_000) if modified is DEFAULT else modified
+    row["ModifiedDate"] = iso_ms(T0 + i * DAY_MS) if modified is DEFAULT else modified
     return row
 
 
@@ -88,14 +89,16 @@ class Spec:
     extra_urls: t.List[str] = field(default_factory=list)
     date_fields: t.Tuple[str, ...] = ("ModifiedDate",)
     # First filter value for start_date 2024-01-01T00:00:00Z.
-    start_value: str = "2023-12-31T00:00:00.000+0000"
+    start_value: str = "2023-12-31 00:00:00"
 
 
 SPECS = {
-    "Company": Spec("Company", query_url("company"), company_row, "ModifiedDate", "Gsid"),
+    "Company": Spec("Company", query_url("Company"), company_row, "ModifiedDate", "Gsid"),
     "timeline": Spec("timeline", query_url("activity_timeline"), timeline_row, "ModifiedDate", "Gsid", shape="records"),
-    "cta": Spec("cta", CTA_URL, cta_row, "ModifiedDate", "Gsid", unordered=True),
-    "cta_deleted": Spec("cta_deleted", CTA_DELETED_URL, cta_deleted_row, "ModifiedDate", "Gsid", unordered=True),
+    "cta": Spec("cta", CTA_URL, cta_row, "ModifiedDate", "Gsid", unordered=True, start_value="2023-12-31"),
+    "cta_deleted": Spec(
+        "cta_deleted", CTA_DELETED_URL, cta_deleted_row, "ModifiedDate", "Gsid", unordered=True, start_value="2023-12-31"
+    ),
     "deleted_records": Spec(
         "deleted_records",
         query_url("record_delete_log"),
@@ -106,7 +109,6 @@ SPECS = {
         context={"delete_log": "record_delete_log"},
         extra_urls=[query_url("record_delete_log_high_volume")],
         date_fields=("DeletedOn",),
-        start_value="2023-12-31 00:00:00",
     ),
 }
 ALL = list(SPECS)
@@ -169,30 +171,34 @@ def first_filter(engine: QueryEngine) -> dict:
 
 @pytest.mark.parametrize("name", ALL)
 @pytest.mark.parametrize("count", [5, 6])
-def test_every_row_arrives_once_across_pages(api, name, count):
+def test_every_row_arrives_once_across_pages(api, capsys, name, count):
     """Covers a short last page (5 rows) and an exact multiple of the limit (6)."""
     spec = SPECS[name]
     rows = [spec.make_row(i) for i in range(count)]
     serve(api, spec, rows)
     stream = make_tap(start_date="2024-02-01T00:00:00Z").streams[name]
     stream.page_size = 2
-    got = [r[spec.key] for r in records(stream, spec)]
+    stream.sync()
+    got = [m["record"][spec.key] for m in messages(capsys) if m["type"] == "RECORD"]
     assert sorted(got) == sorted(r[spec.key] for r in rows)
     assert len(got) == len(set(got))
 
 
 @pytest.mark.parametrize("name", ["Company", "timeline", "deleted_records"])
-def test_keyset_pages_request_limit_rows_from_offset_zero(api, name):
+def test_chain_pages_use_and_only_expressions_from_offset_zero(api, name):
     spec = SPECS[name]
     engine = serve(api, spec, [spec.make_row(i) for i in range(4)])
     stream = make_tap().streams[name]
     stream.page_size = 2
     records(stream, spec)
-    nulls = [b for b in engine.bodies if b["where"]["conditions"][0]["operator"] == "IS_NULL"]
-    keyset = [b for b in engine.bodies if b not in nulls]
-    assert all(b["limit"] == 2 and b["offset"] == 0 for b in keyset)
-    assert keyset[1]["where"]["expression"] == "A OR (B AND C)"
-    assert len(nulls) == 1 and nulls[0]["orderBy"] == {spec.key: "asc"}
+    assert all(b["limit"] == 2 and b["offset"] == 0 for b in engine.bodies)
+    expressions = {b["where"]["expression"] for b in engine.bodies}
+    assert expressions <= {"A", "A AND B", "A AND B AND C"}
+    drains = [b for b in engine.bodies if len(b["where"]["conditions"]) >= 2 and b["where"]["conditions"][1]["operator"] == "LT"]
+    assert drains and all(b["orderBy"] == {spec.key: "asc"} for b in drains)
+    last = engine.bodies[-1]
+    assert last["where"]["conditions"][0]["operator"] == "IS_NULL"
+    assert last["orderBy"] == {spec.key: "asc"}
 
 
 def test_keyset_handles_ties_on_the_replication_key(api):
@@ -209,34 +215,45 @@ def test_keyset_fails_when_the_api_misreads_the_cursor(api):
     serve(api, SPECS["Company"], [company_row(i) for i in range(4)], ignore_offset=True, naive_offset_hours=-8)
     stream = make_tap().streams["Company"]
     stream.page_size = 2
-    with pytest.raises(FatalAPIError, match="did not match the keyset cursor"):
+    with pytest.raises(FatalAPIError, match="did not return the rows it listed"):
         list(stream.get_records(None))
 
 
-def test_keyset_anchor_that_moved_is_not_an_error(api):
+def test_a_row_that_moves_before_its_second_is_drained_is_not_an_error(api):
     rows = [company_row(i) for i in range(4)]
     engine = serve(api, SPECS["Company"], rows)
 
-    def move_anchor(request_number, engine):
+    def move(request_number, engine):
         if request_number == 2:
             rows[1]["ModifiedDate"] = T0 + 99_000
 
-    engine.before_request = move_anchor
+    engine.before_request = move
     stream = make_tap().streams["Company"]
     stream.page_size = 2
     got = {r["Gsid"] for r in stream.get_records(None)}
     assert got == {r["Gsid"] for r in rows}
-    probes = [b for b in engine.bodies if b["limit"] == 1]
-    assert probes and probes[0]["where"]["conditions"][0]["operator"] == "EQ"
-    assert probes[0]["select"] == ["Gsid", "ModifiedDate"]
+    probes = [b for b in engine.bodies if b["select"] == ["Gsid", "ModifiedDate"]]
+    assert len(probes) == 1
+    assert probes[0]["where"]["conditions"][0]["operator"] == "EQ"
+    assert probes[0]["orderBy"] == {"ModifiedDate": "asc"}
 
 
-def test_keyset_page_size_one_cannot_loop(api):
-    serve(api, SPECS["Company"], [company_row(i) for i in range(3)])
+def test_page_size_one_still_reads_every_row(api):
+    rows = [company_row(i) for i in range(3)] + [company_row(9, modified=T0)]
+    serve(api, SPECS["Company"], rows)
     stream = make_tap().streams["Company"]
     stream.page_size = 1
-    with pytest.raises(FatalAPIError, match="no progress"):
-        list(stream.get_records(None))
+    got = [r["Gsid"] for r in stream.get_records(None)]
+    assert sorted(got) == sorted(r["Gsid"] for r in rows)
+
+
+def test_a_full_page_before_the_lower_bound_fails(api):
+    # A server that ignores the filter returns the same early rows forever.
+    api.mocker.post(query_url("Company"), json={"result": True, "data": [company_row(0), company_row(1)]})
+    stream = make_tap(start_date="2025-01-01T00:00:00Z").streams["Company"]
+    stream.page_size = 2
+    with pytest.raises(FatalAPIError, match="had no row at or after that value"):
+        stream.sync()
 
 
 def test_keyset_row_without_a_tiebreaker_fails(api):
@@ -245,31 +262,38 @@ def test_keyset_row_without_a_tiebreaker_fails(api):
     serve(api, SPECS["Company"], rows)
     stream = make_tap().streams["Company"]
     stream.page_size = 2
-    with pytest.raises(FatalAPIError, match="lacks ModifiedDate or Gsid"):
+    with pytest.raises(FatalAPIError, match="lacks Gsid"):
         list(stream.get_records(None))
 
 
-def test_cta_window_check_fails_when_the_api_reads_another_time_zone(api):
-    # The server reads "+0000" values as UTC-8, so each window it serves is
-    # 8 hours later than the one asked for. A CTA at 02:24 UTC lands in the
-    # served window for the day before.
-    rows = [cta_row(0, modified=iso_ms(T0 - 6 * 3_600_000))]
-    serve(api, SPECS["cta"], rows, ignore_offset=True, naive_offset_hours=-8)
-    with pytest.raises(FatalAPIError, match="outside the requested window"):
-        make_tap(start_date="2024-02-05T00:00:00Z").streams["cta"].sync()
+def test_ctas_outside_their_window_are_emitted_and_counted(api, capsys, caplog):
+    logging.getLogger("tap-gainsight").addHandler(caplog.handler)
+    caplog.set_level(logging.DEBUG, logger="tap-gainsight")
+    # The server reads the day values as UTC-8 and includes all of the end
+    # day, so the window [02-04, 02-05] it serves runs to 02-06 08:00 UTC,
+    # and it returns a CTA from 02-06 there too.
+    rows = [cta_row(0, modified="2024-02-06T03:00:00.000Z"), cta_row(1)]
+    serve(api, SPECS["cta"], rows, naive_offset_hours=-8, btw_whole_end_day=True)
+    make_tap(start_date="2024-02-05T00:00:00Z").streams["cta"].sync()
+    got = {m["record"]["Gsid"] for m in messages(capsys) if m["type"] == "RECORD"}
+    assert got == {r["Gsid"] for r in rows}
+    assert "outside the window" in caplog.text
 
 
 def test_cta_windows_grow_after_sparse_windows(api):
     engine = serve(api, SPECS["cta"], [])
-    list(make_tap(start_date="2024-01-01T00:00:00Z").streams["cta"].get_records(None))
-    widths = []
+    make_tap(start_date="2024-01-01T00:00:00Z").streams["cta"].sync()
+    spans = []
     for body in engine.bodies:
-        values = [client.parse_api_datetime(c["value"][0]) for c in body["where"]["conditions"] if c["value"]]
+        values = body["where"]["conditions"][0]["value"]
         if len(values) == 2:
-            widths.append(values[1] - values[0])
-    assert widths[0] == datetime.timedelta(days=1)
-    assert widths[1] == datetime.timedelta(days=2)
-    assert max(widths) <= datetime.timedelta(days=366)
+            first, last = (datetime.date.fromisoformat(v) for v in values)
+            spans.append((last - first).days)
+    assert spans[:3] == [1, 2, 4]
+    assert max(spans) == 366
+    # Windows overlap by a day: each starts on the day the last one ended.
+    starts = [b["where"]["conditions"][0]["value"] for b in engine.bodies if len(b["where"]["conditions"][0]["value"]) == 2]
+    assert all(starts[i + 1][0] == starts[i][1] for i in range(len(starts) - 1))
 
 
 # Empty results
@@ -287,7 +311,7 @@ def test_empty_result(api, name):
     ["company_query_no_data_response.json", "custom_object_query_empty_response.json"],
 )
 def test_documented_empty_replies_end_the_stream(api, fixture):
-    api.mocker.post(query_url("company"), json=load(fixture))
+    api.mocker.post(query_url("Company"), json=load(fixture))
     assert list(make_tap().streams["Company"].get_records(None)) == []
 
 
@@ -302,7 +326,7 @@ def test_incremental_from_nothing(api, name, capsys):
     make_tap().streams[name].sync()
     condition = first_filter(engine)
     if name in CTA_STREAMS:
-        assert condition["value"] == ["2000-01-01T00:00:00.000+0000"]
+        assert condition["value"] == ["2000-01-01", "2000-01-02"]
     else:
         assert condition["operator"] == "IS_NOT_NULL"
     states = [m for m in messages(capsys) if m["type"] == "STATE"]
@@ -315,8 +339,8 @@ def test_incremental_from_start_date_looks_back_24_hours(api, name):
     engine = serve(api, spec, [])
     make_tap(start_date="2024-01-01T00:00:00Z").streams[name].sync()
     condition = first_filter(engine)
-    assert condition["value"] == [spec.start_value]
-    assert condition["operator"] == "GTE"
+    assert condition["value"][0] == spec.start_value
+    assert condition["operator"] == ("BTW" if name in CTA_STREAMS else "GTE")
 
 
 @pytest.mark.parametrize("name", ALL)
@@ -326,8 +350,11 @@ def test_incremental_from_a_bookmark_advances_it(api, name, capsys):
     engine = serve(api, spec, rows)
     old = "2024-02-05T08:24:35.253000+00:00"
     make_tap(state=state_for(spec, old), start_date="2020-01-01T00:00:00Z").streams[name].sync()
-    millis = 0 if name == "deleted_records" else 253000
-    expected_start = datetime.datetime(2024, 2, 4, 8, 24, 35, millis, tzinfo=UTC)
+    # Whole seconds for the query API, whole days for the CTA APIs.
+    if name in CTA_STREAMS:
+        expected_start = datetime.datetime(2024, 2, 4, tzinfo=UTC)
+    else:
+        expected_start = datetime.datetime(2024, 2, 4, 8, 24, 35, tzinfo=UTC)
     assert client.parse_api_datetime(first_filter(engine)["value"][0]) == expected_start
     states = [m for m in messages(capsys) if m["type"] == "STATE"]
     final = bookmark(states[-1], spec)
@@ -369,11 +396,12 @@ def test_mda_nulls_missing_fields_dates_labels_and_lookups(api):
     assert got["1P02COMPANYNODT"]["ModifiedDate"] is None
 
 
-def test_documented_cta_rows_without_modified_date_arrive_in_the_null_pass(api):
+def test_documented_cta_rows_without_modified_date_arrive_in_the_null_pass(api, capsys):
     page = load("cta_list_response.json")["data"]
     page[1]["Quoted_ARR__gc"] = None
     engine = serve(api, SPECS["cta"], page)
-    got = list(make_tap(start_date="2024-01-01T00:00:00Z").streams["cta"].get_records(None))
+    make_tap(start_date="2024-01-01T00:00:00Z").streams["cta"].sync()
+    got = [m["record"] for m in messages(capsys) if m["type"] == "RECORD"]
     assert sorted(r["Name"] for r in got) == ["Today", "Tomorrow"]
     assert [r["TypeId__gr.Name"] for r in got] == ["Risk", "Risk"]
     assert {r["DueDate"] for r in got} == {"2020-04-14T11:30:00Z"}
@@ -383,8 +411,9 @@ def test_documented_cta_rows_without_modified_date_arrive_in_the_null_pass(api):
 
 def test_cta_deleted_has_no_null_pass(api):
     engine = serve(api, SPECS["cta_deleted"], [])
-    list(make_tap(start_date="2024-01-01T00:00:00Z").streams["cta_deleted"].get_records(None))
-    assert all(b["where"]["conditions"][0]["operator"] == "GTE" for b in engine.bodies)
+    make_tap(start_date="2024-01-01T00:00:00Z").streams["cta_deleted"].sync()
+    assert engine.bodies
+    assert all(b["where"]["conditions"][0]["operator"] == "BTW" for b in engine.bodies)
 
 
 def test_deleted_records_read_both_logs(api, capsys):
@@ -411,7 +440,7 @@ def test_other_high_volume_log_errors_still_fail(api):
 
 
 def test_object_not_found_on_another_path_still_fails(api):
-    api.mocker.post(query_url("company"), status_code=400, json=load("describe_not_found_response.json"))
+    api.mocker.post(query_url("Company"), status_code=400, json=load("describe_not_found_response.json"))
     with pytest.raises(FatalAPIError, match="OBJECT_NOT_FOUND"):
         list(make_tap().streams["Company"].get_records(None))
 
@@ -443,7 +472,7 @@ def test_unauthorized_body_on_200_fails_fast(api, name):
 def test_documented_invalid_authorization_headers_code_names_the_access_key(api):
     body = load("company_query_no_data_response.json")
     body["errorCode"], body["errorDesc"] = "GSOBJ_1024", "Invalid authorization headers, please re-check your API request"
-    api.mocker.post(query_url("company"), status_code=400, json=body)
+    api.mocker.post(query_url("Company"), status_code=400, json=body)
     with pytest.raises(FatalAPIError, match="400 Client Error.*rejected the access key"):
         list(make_tap().streams["Company"].get_records(None))
 
@@ -500,7 +529,7 @@ def test_documented_cta_error_on_200_fails(api):
 
 
 def test_unexpected_data_shape_fails(api):
-    api.mocker.post(query_url("company"), json={"result": True, "data": "surprise"})
+    api.mocker.post(query_url("Company"), json={"result": True, "data": "surprise"})
     with pytest.raises(FatalAPIError, match="Unexpected `data` shape"):
         list(make_tap().streams["Company"].get_records(None))
 

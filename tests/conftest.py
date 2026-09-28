@@ -239,7 +239,16 @@ class QueryEngine:
         unordered: bool = False,
         naive_offset_hours: float = 0,
         ignore_offset: bool = False,
+        grain_ms: t.Optional[int] = None,
+        btw_whole_end_day: bool = False,
     ) -> None:
+        """`grain_ms` truncates filter values, as a server comparing at a
+        coarser grain would: 1000 for seconds, 86_400_000 for dates.
+        `btw_whole_end_day` reads the second BTW value as the end of that day
+        instead of its first instant.
+        """
+        self.grain_ms = grain_ms
+        self.btw_whole_end_day = btw_whole_end_day
         self.rows = rows
         self.date_fields = set(date_fields)
         self.shape = shape
@@ -253,7 +262,10 @@ class QueryEngine:
         if field_name in self.date_fields:
             if from_row:
                 return to_ms(value)
-            return to_ms(value, self.naive_offset_hours, self.ignore_offset)
+            ms = to_ms(value, self.naive_offset_hours, self.ignore_offset)
+            if self.grain_ms and ms is not None:
+                ms -= ms % self.grain_ms
+            return ms
         return value
 
     def _test(self, row: dict, condition: dict) -> bool:
@@ -276,11 +288,15 @@ class QueryEngine:
             "LTE": lambda a, b: a <= b[0],
             "BTW": lambda a, b: b[0] <= a <= b[1],
         }
+        if operator == "BTW" and self.btw_whole_end_day and field_name in self.date_fields:
+            return expected[0] <= actual < expected[1] + 86_400_000
         return ops[operator](actual, expected)
 
     def _matches(self, row: dict, where: t.Optional[dict]) -> bool:
         if not where:
             return True
+        if "(" in where["expression"] or ")" in where["expression"]:
+            raise AssertionError(f"Undocumented parentheses in {where['expression']!r}")
         results = {c["alias"]: self._test(row, c) for c in where["conditions"]}
         tokens = re.findall(r"\(|\)|AND|OR|[A-Z]", where["expression"])
         python = " ".join(
