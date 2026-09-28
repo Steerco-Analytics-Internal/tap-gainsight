@@ -50,17 +50,19 @@ Stream names:
   `renewal__gc`.
 - The API-backed streams use short snake_case names.
 
-Every call uses an object's name exactly as the object list returns it. The
-list sample shows lowercase names, such as `company`, so the `Company` stream
-queries `/v1/data/objects/query/company`.
+Describe calls use an object's name exactly as the object list returns it,
+such as `company`. Query paths use the documented casing for the documented
+objects: `Company`, `Company_Person`, `Person`, `GsUser` and
+`activity_timeline`, and the two delete logs as their page shows them. Every
+other object uses its listed name.
 
 ### Notes on each stream
 
 - **MDA objects.** The schema comes from the describe API at discovery time.
-  Every standard and custom field comes through, except fields the describe
-  flags `hidden` or `deleted`. Every property is nullable. The query selects
-  every property the catalog selects, plus `Gsid` and `ModifiedDate`, which
-  paging needs.
+  Every standard and custom field comes through, including hidden fields.
+  Fields the describe flags `deleted` are left out. Every property is
+  nullable. The query selects every property the catalog selects, plus
+  `Gsid` and `ModifiedDate`, which paging needs.
 - **Lookups.** A lookup to `GsUser`, such as an owner or CSM, also selects
   `<lookup>__gr.Name` and `<lookup>__gr.Email`. A lookup to `Company` also
   selects `<lookup>__gr.Name`. They are flat columns named with the documented
@@ -117,46 +119,67 @@ Failures:
 - A failed dropdown call logs a warning. That picklist gets no label column.
 
 Every tap run discovers again, so new custom fields appear on the next run.
-When a run gets a catalog, the tap checks it against that discovery. If the
-catalog selects a stream or column that discovery could not produce, the run
-fails and names each one. It does not drop them silently.
+When a run gets a catalog, the tap compares it with that discovery:
+
+- A selected stream or column that is missing because a describe, dropdown
+  or lookup-target call failed in this run fails the run, and the error
+  names each one. The SDK would otherwise skip it without a word.
+- A selected stream or column that Gainsight no longer has, such as an
+  object or field an admin deleted, logs a warning. The rest syncs. Run
+  discovery again to update the catalog.
 
 ## Sync behavior
 
-- **MDA paging (keyset).** Streams with a replication key page by keyset on
-  `(ModifiedDate, Gsid)`, 5000 rows a page. The first page filters
-  `ModifiedDate GTE <start>`, or `IS_NOT_NULL` on a first run. Each later page
-  asks for the rows after the last one seen:
-  `A OR (B AND C)`, with `A: ModifiedDate GT x`, `B: ModifiedDate EQ x` and
-  `C: Gsid GTE g`. A row edited or deleted during the sync cannot hide another
-  row, as it can with offset paging. The last row seen (the anchor) comes back
-  in the next page and is dropped. If it is missing, the tap reads it by
-  `Gsid`. If it still has the value `x`, the API did not match the cursor, and
-  the stream fails rather than skip rows. A last pass reads rows with a null
-  `ModifiedDate`, sorted by `Gsid`.
+- **MDA paging (whole-second chain).** Streams with a replication key read
+  in a chain of whole seconds, 5000 rows a page, with AND-only filters:
+  1. Scan: `ModifiedDate GTE L` (or `IS_NOT_NULL` on a first run), ordered by
+     `ModifiedDate` then `Gsid`. Rows in every second before the page's last
+     second are complete, so the tap emits them.
+  1. Drain the page's last second s:
+     `ModifiedDate GTE s AND ModifiedDate LT s+1s AND Gsid GT g`, ordered by
+     `Gsid`, until a page is short.
+  1. Set L to s+1s and scan again.
+
+  A row edited or deleted during the sync cannot hide another row, as it can
+  with offset paging, and no filter needs milliseconds. If a drain returns
+  none of the rows the scan listed for its second, the tap reads one of them
+  by `Gsid`. If it still has that second, the API read the filter in another
+  time zone or grain, and the stream fails rather than skip rows. Rows a
+  server returns outside the range asked for are duplicates: the tap drops
+  them and counts them in a debug log. A last pass reads rows with a null
+  `ModifiedDate`: `ModifiedDate IS_NULL`, then `AND Gsid GT g`.
 - **Full-table MDA streams.** Objects with no usable replication key page by
-  `offset`, sorted by `Gsid`.
-- **Delete log paging.** The same keyset scheme on `(DeletedOn, RecordId)`.
-  A tenant with no high-volume log gets "Requested object not found" there.
-  The tap treats that as empty and logs a warning. Any other error fails.
+  `Gsid GT g`, ordered by `Gsid`. An object whose `Gsid` is not sortable
+  falls back to `offset` paging.
+- **Delete log paging.** The same chain on `(DeletedOn, RecordId)`. A tenant
+  with no high-volume log gets "Requested object not found" there. The tap
+  treats that as empty and logs a warning. Any other error fails.
 - **CTA windows.** The CTA list APIs page by `pageNumber` and document no sort
   order, so paging can skip or repeat rows. The tap reads `ModifiedDate`
-  windows that each fit in one page of 1000 instead:
-  - The first window is one day long.
-  - A window that fills a page is halved and read again, down to one hour.
-  - A one-hour window that still fills a page is paged, with a warning.
-  - After a window less than half full, the next window doubles, up to a year.
+  windows that each fit in one page of 1000, with the documented filter
+  `ModifiedDate BTW [first day, last day]` and `yyyy-MM-dd` values:
+  - The docs do not say whether `BTW` includes all of the last day or only its
+    first instant. Windows overlap by one day, each starting on the day the
+    last one ended, so either reading covers every day. At worst a CTA
+    arrives twice.
+  - The first window is [d, d+1], where d is the day of the bookmark or
+    `start_date` less 24 hours. That is also the shortest window.
+  - A longer window that fills a page is halved and read again. A shortest
+    window that fills a page is paged with `pageNumber`, with a warning.
+  - After a window less than half full, the next window doubles, up to 366
+    days. Windows run to tomorrow, UTC.
 
-  Every returned CTA must have a `ModifiedDate` inside its window. If one does
-  not, the API read the filter differently, and the stream fails. With no
-  bookmark and no `start_date`, windows start at 2000-01-01. `cta` also reads
-  CTAs with a null `ModifiedDate` in a last pass.
-- **Date filters and the 24-hour lookback.** The docs do not say which time
-  zone a filter value is read in. Every incremental filter starts 24 hours
-  before its bookmark or `start_date`. Targets dedupe the overlap by key.
-  MDA and CTA filters use `yyyy-MM-dd'T'HH:mm:ss.SSS+0000`, the DateTime
-  format in the Timeline APIs page. The delete log uses `yyyy-MM-dd HH:mm:ss`
-  in UTC, the form in its sample.
+  A CTA outside its window comes from a server that reads the days in
+  another time zone. It is emitted, and counted in a debug log. With no
+  bookmark and no `start_date`, windows start at 2000-01-01, about 36 calls
+  for an empty tenant. `cta` also reads CTAs with a null `ModifiedDate` in a
+  last pass, with the documented `IS_NULL` filter. `cta_deleted` has no such
+  pass, because the Retrieve Deleted Data samples show no `IS_NULL` filter.
+- **Date filters and the 24-hour lookback.** Query API filters use
+  `yyyy-MM-dd HH:mm:ss` in UTC, the form in the delete log sample. CTA
+  filters use `yyyy-MM-dd`. The docs do not say which time zone a filter
+  value is read in, so every first filter starts 24 hours before its
+  bookmark or `start_date`. Targets dedupe the overlap by key.
 - **Rate limits.** Gainsight documents 100 synchronous calls per minute.
   The tap has one client-side limiter for all streams and metadata calls.
   Retries count against it.
@@ -211,30 +234,32 @@ Other facts and where they come from:
 
 Check these against a live tenant before release, roughly in this order:
 
-- **Filter value format.** MDA and CTA filters send
-  `2024-02-05T08:24:35.253+0000`. That is a documented Gainsight DateTime
-  format, but no filter sample uses it. If the API rejects it, every
-  incremental MDA and CTA stream fails with GSOBJ_1005 on its first request.
-  If the API ignores the offset, the keyset anchor check or the CTA window
-  check fails the stream. Either way it fails loudly, not silently.
-- **Keyset expression.** The docs show expressions like `A AND B` and
-  `A OR B`, never parentheses. The keyset page sends `A OR (B AND C)`.
-- **Range filters on the CTA APIs.** The CTA samples filter `DueDate` and
-  `ModifiedDate` with date-only values and `EQ`, `BTW` or a literal. The tap
-  sends `GTE` and `LT` with date-time values. Both operators are documented
-  for dates.
+- **Three-term AND.** The docs show `A AND B`. The drain step sends
+  `A AND B AND C`. That is the one extension beyond the documented form.
+- **Filter time zone in the chain.** The first filter has a 24-hour
+  lookback. Later scan and drain filters come from row values and assume the
+  API reads `yyyy-MM-dd HH:mm:ss` as UTC. If it does not, the drain check
+  fails the stream loudly. It never skips rows silently.
+- **Date-grain query filters.** If the query API compared DateTime filters
+  by date only, a one-second drain could not work. The drain check then
+  fails the stream loudly.
+- **CTA `BTW` reading.** The overlapping windows cover either reading of the
+  end day, at the cost of some duplicate CTAs.
 - **`timeline` replication key.** See the stream note above.
-- **Object name case.** The tap calls every object by its listed name, for
-  example `company`. The Company API page shows `Company` in its path. If the
-  query API is case-sensitive the other way, discovery works but queries fail.
+- **Object name case.** Describe calls use the listed name, such as
+  `company`. Queries use the documented casing for documented objects, such
+  as `Company`, and the listed name for the rest. If the query API is
+  case-sensitive in another way, discovery works but those queries fail.
 - **Picklist metadata.** No describe sample in the docs shows a picklist field.
   The tap reads labels from any list under a describe key containing
   "picklist" whose items have `gsid`. That is the dropdown API's item shape.
   Otherwise it reads a `categoryId` and calls the dropdown API. If a live
   describe uses another shape, picklists get no label column. Ids still sync.
-- **Hidden and deleted flags.** The describe sample shows `meta.hidden`. A
-  field-level `deleted` flag is inferred from the lookup detail's `deleted`
-  key.
+- **Deleted flags.** A field-level `deleted` flag is inferred from the
+  lookup detail's `deleted` key in the describe sample. Hidden fields are
+  kept, because hiding changes the UI, not the data.
+- **Deleted CTAs with a null `ModifiedDate`.** `cta_deleted` does not read
+  them. The docs show no `IS_NULL` filter for that endpoint.
 - **Dropdown and multi-select type names.** The docs do not give their
   describe `dataType` values. They map to "any JSON type".
 - **Response `data` shape.** The Company and CTA pages show `data` as a list.
@@ -289,15 +314,17 @@ which entry each helper starts from.
 
 The fake API in `tests/conftest.py` is case-sensitive, and its query engine
 honors `where`, `expression`, `orderBy`, `limit` and `offset`, and
-`pageSize` and `pageNumber`. It can serve CTA pages in an unstable order, and
-it can misread time zones, so the tests show what the paging schemes protect
-against.
+`pageSize` and `pageNumber`. It rejects parentheses in `expression`. It can
+serve CTA pages in an unstable order, misread time zones, compare filters at
+second or date grain, and read `BTW` as including all of the end day. The
+tests use these modes to show what the paging schemes protect against.
 
 The suite covers:
 
 - Contract tests that match each request to the documented shape.
 - Behavior tests for each stream.
-- Regression tests for the review findings, in `tests/test_regressions.py`.
+- Regression tests for the review findings, in `tests/test_regressions.py`
+  and `tests/test_regressions_delta.py`.
 - An end-to-end run of the CLI: `--discover`, then a sync with a catalog and
   state.
 
