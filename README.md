@@ -12,6 +12,44 @@ custom objects.
 > as unconfirmed until a live response matches it. The list in
 > [Known gaps](#known-gaps-and-unverified-behavior) says what to check first.
 
+## Safety
+
+The tap is read-only, and the code enforces it. Every HTTP request goes
+through one function, `send` in `tap_gainsight/safety.py`. Before any
+network I/O it checks the request against a fixed allowlist, and refuses
+anything else with `GainsightSafetyError`, whatever the config or catalog.
+
+The allowlist (`READ_ONLY_ALLOWLIST`) holds only the documented read
+endpoints the tap uses:
+
+| Method | Path | Query keys | Body keys |
+|---|---|---|---|
+| GET | `/v1/meta/services/objects/list` | `po`, `em` | none |
+| GET | `/v1/meta/services/objects/{object}/describe` | `ic`, `cl`, `idd`, `ihc`, `piec` | none |
+| POST | `/v1/meta/services/objects/describe` | none | `objectNames` and the describe flags |
+| GET | `/v1/meta/services/dropdowns/{categoryId}` | none | none |
+| POST | `/v1/data/objects/query/{object}` (also timeline and the delete logs) | none | `select`, `where`, `orderBy`, `limit`, `offset` |
+| POST | `/v2/cockpit/cta/list` | none | `select`, `where`, `pageSize`, `pageNumber` |
+| POST | `/v2/cockpit/cta/deleted/list` | none | `select`, `where`, `pageSize`, `pageNumber` |
+
+The checks:
+
+- Every path pattern is anchored. `{object}` is letters, digits and
+  underscores only. A path with `%`, `//`, `.` or `..` segments, or an extra
+  segment, is refused. So are PUT, DELETE and PATCH, and the insert path
+  `POST /v1/data/objects/{object}`.
+- A GET has no body. A POST body is a JSON object with only the read keys
+  above, and no `records`, `data`, `lookups` or `updateKeys` key anywhere in
+  it.
+- Redirects are never followed, so the access key never goes to another host.
+- `max_requests_per_minute` can lower the rate, and `max_requests` caps the
+  run.
+- Error messages may quote a response body, with any echoed access key
+  replaced by `***`. They never print record values.
+
+The test suite records every request it sends and checks each one against
+the allowlist at the end of the run.
+
 ## Configuration
 
 | Setting | Required | Description |
@@ -20,6 +58,8 @@ custom objects.
 | `domain` | Yes | Tenant base URL or subdomain, such as `acme.gainsightcloud.com`. The scheme is optional. The tap always uses `https://<host>`. A bare name with no dot, such as `acme`, becomes `acme.gainsightcloud.com`. |
 | `start_date` | No | ISO 8601 date-time. The earliest modified date for incremental streams on their first run. |
 | `filter_timezone` | No | IANA time zone name, such as `America/Los_Angeles`. Set it only when the tenant reads query filter times in its local time zone. Query API and delete log filter values are then sent in that zone, with its daylight saving rules. Unset means UTC. An unknown name fails config validation. See [Filter time zone](#filter-time-zone). |
+| `max_requests_per_minute` | No | Client-side request rate, from 1 to 100. The default is 100, the documented limit. It can only be lowered. |
+| `max_requests` | No | Hard cap on requests in one run, retries and discovery included. The run stops with an error when it is reached. |
 | `objects` | No | Allowlist of MDA object API names, such as `["Person", "Renewal__gc"]`. When set, only `Company` and these objects get a stream. When not set, every readable object gets a stream. |
 
 Example `config.json`:
