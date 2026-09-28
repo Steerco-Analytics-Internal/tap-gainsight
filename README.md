@@ -19,6 +19,7 @@ custom objects.
 | `access_key` | Yes | Gainsight REST API Access Key. The tap sends it in the `AccessKey` header. It is a secret. |
 | `domain` | Yes | Tenant base URL or subdomain, such as `acme.gainsightcloud.com`. The scheme is optional. The tap always uses `https://<host>`. A bare name with no dot, such as `acme`, becomes `acme.gainsightcloud.com`. |
 | `start_date` | No | ISO 8601 date-time. The earliest modified date for incremental streams on their first run. |
+| `filter_timezone` | No | IANA time zone name, such as `America/Los_Angeles`. Set it only when the tenant reads query filter times in its local time zone. Query API and delete log filter values are then sent in that zone, with its daylight saving rules. Unset means UTC. An unknown name fails config validation. See [Filter time zone](#filter-time-zone). |
 | `objects` | No | Allowlist of MDA object API names, such as `["Person", "Renewal__gc"]`. When set, only `Company` and these objects get a stream. When not set, every readable object gets a stream. |
 
 Example `config.json`:
@@ -97,6 +98,17 @@ from a bookmark or `start_date` more than 15 days old, the tap logs an
 **ERROR** with the size of the gap and still syncs what Gainsight has. Deletes
 from the part of the gap older than 15 days are lost. Alert on that log line.
 
+## Filter time zone
+
+The query API and delete log filters send `yyyy-MM-dd HH:mm:ss` values with
+no offset, in UTC. The docs do not say which zone the API reads them in.
+If a tenant reads them in its local zone, the whole-second chain would skip
+rows, so the tap stops the stream with an error that ends: "If your
+Gainsight tenant reads filter times in its local time zone, set
+filter_timezone." Set `filter_timezone` to the tenant's zone and run again.
+CTA filters use whole days with overlapping windows, so they need no
+setting.
+
 ## How discovery works
 
 Discovery runs with only `access_key` and `domain`. It makes these calls:
@@ -165,7 +177,12 @@ When a run gets a catalog, the tap compares it with that discovery:
   - The first window is [d, d+1], where d is the day of the bookmark or
     `start_date` less 24 hours. That is also the shortest window.
   - A longer window that fills a page is halved and read again. A shortest
-    window that fills a page is paged with `pageNumber`, with a warning.
+    window that fills a page is read twice with `pageNumber`, and the two
+    reads are merged by `Gsid`, with a warning. An unordered page read can
+    miss a CTA edited during the sync. It is lost only if both reads miss
+    it. A miss in a recent window is picked up by the next run's lookback.
+    A miss in an older backfill window is picked up only when that CTA is
+    edited again.
   - After a window less than half full, the next window doubles, up to 366
     days. Windows run to tomorrow, UTC.
 
@@ -238,8 +255,9 @@ Check these against a live tenant before release, roughly in this order:
   `A AND B AND C`. That is the one extension beyond the documented form.
 - **Filter time zone in the chain.** The first filter has a 24-hour
   lookback. Later scan and drain filters come from row values and assume the
-  API reads `yyyy-MM-dd HH:mm:ss` as UTC. If it does not, the drain check
-  fails the stream loudly. It never skips rows silently.
+  API reads `yyyy-MM-dd HH:mm:ss` in UTC, or in `filter_timezone` when it is
+  set. If it does not, the drain check fails the stream loudly and names the
+  setting. It never skips rows silently.
 - **Date-grain query filters.** If the query API compared DateTime filters
   by date only, a one-second drain could not work. The drain check then
   fails the stream loudly.
