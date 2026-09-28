@@ -67,9 +67,13 @@ The checks:
   header, is refused.
 - Every session has `trust_env` off, so `.netrc` files and proxy settings
   cannot add headers. `send` refuses a session with it on.
+- Every session refuses to store cookies, so a load balancer cookie such as
+  `AWSALB` is never sent back. A `Cookie` header is still refused.
 - Redirects are never followed, so the access key never goes to another host.
 - Object names from the object list that are not plain identifiers are
-  skipped.
+  skipped. Names in the `objects` setting must be plain identifiers, or
+  config validation fails. Every host and name pattern must match the whole
+  value, so a trailing newline cannot slip through.
 - The default rate is 30 requests a minute, below Gainsight's documented
   100, to share the tenant's allowance. `max_requests_per_minute` can set 1
   to 100, and `max_requests` caps the run.
@@ -77,14 +81,21 @@ The checks:
 
 ### What errors and logs show
 
-Errors and logs never quote a response body or a record value. For the
-documented error shape, they show the HTTP status, `errorCode` or `title`,
-and `errorDesc` cut before its first `=`, `:` or `(` and capped at 200
-characters. Gainsight's error templates put values after those characters,
-as in "Invalid dateTime format (%s(columnName)= %s(columnValue))". For any
-other body, they show only its length and content type. An unexpected
-response shape is described by its key names and types. Any echoed access
-key is replaced by `***`.
+Errors and logs never quote a response body, `errorDesc` or a record value.
+Gainsight's error templates put values in `errorDesc`, as in "Invalid
+dateTime format (%s(columnName)= %s(columnValue))". For the documented error
+shape, a message gives:
+
+- the HTTP status;
+- `errorCode` and `title`, only when each is a code of up to 50 capitals,
+  digits and underscores. Any other value gives only its type or length;
+- the tap's own fixed description for a code it handles: GSOBJ_1011,
+  GSOBJ_1005, GSOBJ_1023, GSOBJ_1024, GS_APIG_2401, COCKPIT_5101 and
+  OBJECT_NOT_FOUND.
+
+For any other body, a message gives the status and the body length only.
+An unexpected response shape is described by its key names and types. Any
+echoed access key is replaced by `***`.
 
 ### Tests
 
