@@ -59,13 +59,6 @@ class AllowedRequest(t.NamedTuple):
 READ_ONLY_ALLOWLIST: t.Tuple[AllowedRequest, ...] = (
     # Data Management APIs, "Get Lite API Call OMD".
     AllowedRequest("GET", r"^/v1/meta/services/objects/list$", frozenset({"po", "em"}), frozenset()),
-    # Data Management APIs, "Get Describe OMD".
-    AllowedRequest(
-        "GET",
-        rf"^/v1/meta/services/objects/{_NAME}/describe$",
-        frozenset({"ic", "cl", "idd", "ihc", "piec"}),
-        frozenset(),
-    ),
     # Data Management APIs, "Post Describe OMD".
     AllowedRequest("POST", r"^/v1/meta/services/objects/describe$", frozenset(), DESCRIBE_BODY_KEYS),
     # Data Management APIs, "Get API - categoryID".
@@ -76,6 +69,14 @@ READ_ONLY_ALLOWLIST: t.Tuple[AllowedRequest, ...] = (
     AllowedRequest("POST", r"^/v2/cockpit/cta/list$", frozenset(), CTA_BODY_KEYS),
     # Retrieve Deleted Data API, CTA, "Endpoint One".
     AllowedRequest("POST", r"^/v2/cockpit/cta/deleted/list$", frozenset(), CTA_BODY_KEYS),
+)
+
+
+# The request header names the tap sends, lowercase. requests adds the
+# last four. Anything else, such as X-HTTP-Method-Override or
+# Authorization, is refused.
+ALLOWED_HEADERS = frozenset(
+    {"accesskey", "content-type", "content-length", "user-agent", "accept", "accept-encoding", "connection"}
 )
 
 
@@ -160,18 +161,51 @@ def check_request(method: str, url: str, body: t.Optional[bytes | str]) -> None:
         )
 
 
+def check_destination(url: str, pinned_host: str) -> None:
+    """Raise unless `url` is https to exactly `pinned_host`, on the default port."""
+    parts = urlsplit(url)
+    if parts.scheme != "https":
+        raise GainsightSafetyError(f"Refused {parts.scheme or 'no'} scheme: only https is allowed.")
+    if "@" in parts.netloc or parts.username is not None or parts.password is not None:
+        raise GainsightSafetyError("Refused a URL with user information.")
+    if ":" in parts.netloc.strip("[]") or parts.port is not None:
+        raise GainsightSafetyError("Refused a URL with an explicit port.")
+    if (parts.hostname or "") != pinned_host.lower():
+        raise GainsightSafetyError(
+            f"Refused host {parts.hostname!r}: the tap only talks to {pinned_host!r}."
+        )
+
+
+def check_headers(headers: t.Mapping[str, str]) -> None:
+    """Raise unless every header name is one the tap sends."""
+    extra = sorted(name for name in headers if name.lower() not in ALLOWED_HEADERS)
+    if extra:
+        raise GainsightSafetyError(f"Refused headers {extra}: not on the tap's header allowlist.")
+
+
 def send(
     session: requests.Session,
     prepared: requests.PreparedRequest,
     limiter: t.Any,
     budget: t.Optional[RequestBudget] = None,
+    *,
+    pinned_host: str,
     **kwargs: t.Any,
 ) -> requests.Response:
     """The single place the tap sends HTTP. Checks, then rate limits, then sends.
 
+    The checks: the session ignores the environment (no .netrc or proxy
+    settings), the URL is https to the pinned host, the headers are on the
+    header allowlist, and the method, path and body are an allowed read.
     Redirects are never followed: requests would resend the AccessKey header
     to the new host.
     """
+    if session.trust_env:
+        raise GainsightSafetyError(
+            "Refused a session with trust_env on: .netrc or proxy settings could add headers."
+        )
+    check_destination(prepared.url or "", pinned_host)
+    check_headers(prepared.headers or {})
     check_request(prepared.method or "", prepared.url or "", prepared.body)
     if budget is not None:
         budget.spend()

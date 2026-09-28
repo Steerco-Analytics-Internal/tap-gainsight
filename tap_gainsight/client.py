@@ -35,7 +35,6 @@ from singer_sdk.streams import RESTStream
 from tap_gainsight import safety
 
 DEFAULT_HOST_SUFFIX = ".gainsightcloud.com"
-BODY_EXCERPT_LENGTH = 500
 MAX_TRIES = 8
 MAX_WAIT_SECONDS = 60
 REQUEST_TIMEOUT_SECONDS = 300
@@ -43,6 +42,9 @@ REQUEST_TIMEOUT_SECONDS = 300
 # Docs: "Synchronous API Calls: 100 API calls per min", a fixed window.
 # Source: every API page above, section "Throttling Limits".
 RATE_LIMIT_CALLS = 100
+# The tap's default is lower, to share the tenant's allowance with other
+# integrations.
+DEFAULT_REQUESTS_PER_MINUTE = 30
 RATE_LIMIT_PERIOD_SECONDS = 60.0
 
 # Docs, Data Management APIs, "Get API - categoryID", Sample Failure Response.
@@ -141,36 +143,92 @@ class RateLimiter:
                 waited += delay
 
 
-def normalize_domain(value: str) -> str:
-    """Return `https://<host>` for a domain, a URL, or a bare subdomain.
+_LABEL = r"[a-z0-9-]+"
+GAINSIGHT_HOST = re.compile(rf"^{_LABEL}(\.{_LABEL})*\.gainsightcloud\.com$")
+CUSTOM_HOST = re.compile(rf"^{_LABEL}(\.{_LABEL})*\.[a-z][a-z0-9-]*$")
+_BARE_HOST_CHARS = re.compile(r"^[A-Za-z0-9.-]+$")
 
-    A value with no dot, such as `acme`, becomes `acme.gainsightcloud.com`.
+
+def pinned_host(domain: str, custom_domain: t.Optional[str] = None) -> str:
+    """Return the one host the tap may call. Raise ValueError otherwise.
+
+    `domain` is a bare host, optionally after `https://`. A single label,
+    such as `acme`, becomes `acme.gainsightcloud.com`. The host must be a
+    subdomain of gainsightcloud.com, or equal `custom_domain`, so a custom
+    host is a deliberate, double-entered choice. User information, ports,
+    paths, queries, fragments, braces and whitespace are refused.
     """
-    raw = (value or "").strip()
-    if not raw:
-        raise ValueError("The `domain` setting is empty.")
-    if "://" not in raw:
-        raw = f"https://{raw}"
-    host = urlparse(raw).netloc
-    if not host:
-        raise ValueError(f"The `domain` setting has no host: {value!r}")
+    raw = domain if isinstance(domain, str) else ""
+    host = raw[len("https://"):] if raw.lower().startswith("https://") else raw
+    if not host or not _BARE_HOST_CHARS.match(host):
+        raise ValueError(
+            f"The `domain` setting {domain!r} is not a bare host. Use a host such "
+            "as acme.gainsightcloud.com, optionally after https://, with no "
+            "port, path, user information or spaces."
+        )
+    host = host.lower()
     if "." not in host:
         host = f"{host}{DEFAULT_HOST_SUFFIX}"
-    return f"https://{host}"
+    if GAINSIGHT_HOST.match(host):
+        return host
+    if custom_domain is not None:
+        custom = str(custom_domain).lower()
+        if custom != host:
+            raise ValueError(
+                f"The `custom_domain` setting {custom_domain!r} must equal the "
+                f"`domain` host {host!r}."
+            )
+        if not CUSTOM_HOST.match(host):
+            raise ValueError(f"The custom domain {host!r} is not a host name.")
+        return host
+    raise ValueError(
+        f"The `domain` host {host!r} is not under gainsightcloud.com. For a "
+        "custom Gainsight domain, also set `custom_domain` to the same host."
+    )
 
 
-def body_excerpt(response: requests.Response) -> str:
-    """Return the start of a response body, for error messages.
+def normalize_domain(domain: str, custom_domain: t.Optional[str] = None) -> str:
+    """Return `https://<pinned host>`. See pinned_host."""
+    return f"https://{pinned_host(domain, custom_domain)}"
 
-    An access key the body echoes back is replaced with `***`.
+
+# errorDesc templates interpolate values after "=", ":" or "(", as in
+# GSOBJ_1005 "Invalid dateTime format (%s(columnName)= %s(columnValue))".
+_ERROR_DESC_CUT = re.compile(r"[=:(]")
+ERROR_DESC_LENGTH = 200
+
+
+def response_summary(response: requests.Response) -> str:
+    """Describe an error response without its data.
+
+    For the documented error shape: the status, `errorCode` or `title`, and
+    `errorDesc`
+    cut before the first "=", ":" or "(" and capped at 200 characters, so
+    interpolated values are dropped. Otherwise: the status, the body length
+    and the content type. An access key the text echoes becomes `***`.
     """
-    text = response.text or ""
+    payload = json_or_none(response)
+    parts = [f"HTTP {response.status_code}"]
+    if isinstance(payload, dict) and ({"errorCode", "errorDesc", "title"} & set(payload)):
+        if payload.get("errorCode") is not None:
+            parts.append(f"errorCode {str(payload.get('errorCode'))[:50]}")
+        # Data Management failure samples carry a code in "title", such as
+        # OBJECT_NOT_FOUND.
+        if payload.get("title") is not None:
+            parts.append(f"title {str(payload.get('title'))[:50]}")
+        desc = str(payload.get("errorDesc") or "")
+        desc = _ERROR_DESC_CUT.split(desc, 1)[0].strip()[:ERROR_DESC_LENGTH]
+        if desc:
+            parts.append(f"errorDesc {desc!r}")
+    else:
+        length = len(response.content or b"")
+        kind = response.headers.get("Content-Type") or "unknown content type"
+        parts.append(f"{length} bytes of {kind}")
+    text = ", ".join(parts)
     request = getattr(response, "request", None)
     key = request.headers.get("AccessKey") if request is not None else None
     if key:
         text = text.replace(key, "***")
-    if len(text) > BODY_EXCERPT_LENGTH:
-        return text[:BODY_EXCERPT_LENGTH] + "..."
     return text
 
 
@@ -243,9 +301,12 @@ def extract_rows(payload: t.Any) -> list:
             return []
         if isinstance(records, list):
             return records
-    raise FatalAPIError(
-        f"Unexpected `data` shape in the response: {str(data)[:BODY_EXCERPT_LENGTH]}"
-    )
+    if isinstance(data, dict):
+        shape = ", ".join(f"{key}: {type(value).__name__}" for key, value in data.items())
+        detail = f"an object with keys {{{shape}}}"
+    else:
+        detail = f"a {type(data).__name__}"
+    raise FatalAPIError(f"Unexpected `data` shape in the response: {detail}.")
 
 
 def to_iso_datetime(value: t.Any) -> t.Any:
@@ -413,10 +474,13 @@ class GainsightMetadataClient:
         session: t.Optional[requests.Session] = None,
         budget: t.Optional[safety.RequestBudget] = None,
     ) -> None:
-        self.base_url = normalize_domain(config["domain"])
+        self.host = pinned_host(config["domain"], config.get("custom_domain"))
+        self.base_url = f"https://{self.host}"
         self.rate_limiter = rate_limiter
         self.budget = budget
         self.session = session or requests.Session()
+        # No .netrc or proxy settings: they could add an Authorization header.
+        self.session.trust_env = False
         # Docs: pass the access key in the "accesskey" header. Header names
         # are case-insensitive in HTTP.
         self.session.headers.update(
@@ -451,12 +515,13 @@ class GainsightMetadataClient:
                 prepared,
                 self.rate_limiter,
                 self.budget,
+                pinned_host=self.host,
                 timeout=REQUEST_TIMEOUT_SECONDS,
             )
             status = response.status_code
             if status == 429 or status >= 500:
                 raise _RetriableError(
-                    f"{status} from {label}: {body_excerpt(response)}", status
+                    f"{status} from {label}: {response_summary(response)}", status
                 )
             return response
 
@@ -476,21 +541,21 @@ class GainsightMetadataClient:
         if status in (401, 403) or is_unauthorized_payload(payload):
             raise GainsightAuthError(
                 f"{status}: Gainsight rejected the access key on {label}. Check "
-                f"`access_key` and `domain`. Body: {body_excerpt(response)}",
+                f"`access_key` and `domain`. Response: {response_summary(response)}",
                 status,
             )
         if status >= 400:
             raise GainsightAPIError(
-                f"{status} from {label}: {body_excerpt(response)}", status
+                f"{status} from {label}: {response_summary(response)}", status
             )
         if not isinstance(payload, dict):
             raise GainsightAPIError(
-                f"{label} did not return a JSON object: {body_excerpt(response)}",
+                f"{label} did not return a JSON object: {response_summary(response)}",
                 status,
             )
         if payload.get("result") is False:
             raise GainsightAPIError(
-                f"{label} failed: {body_excerpt(response)}", status
+                f"{label} failed: {response_summary(response)}", status
             )
         return payload
 
@@ -509,7 +574,7 @@ class GainsightMetadataClient:
         data = payload.get("data")
         if not isinstance(data, list):
             raise GainsightAPIError(
-                f"The object list returned no `data` list: {str(payload)[:500]}"
+                f"The object list returned no `data` list. Keys: {sorted(payload)}"
             )
         return [item for item in data if isinstance(item, dict)]
 
@@ -564,7 +629,23 @@ class GainsightStream(RESTStream):
 
     @property
     def url_base(self) -> str:
-        return normalize_domain(self.config["domain"])
+        return f"https://{self.pinned_host}"
+
+    @property
+    def pinned_host(self) -> str:
+        return pinned_host(self.config["domain"], self.config.get("custom_domain"))
+
+    @property
+    def requests_session(self) -> requests.Session:
+        """The SDK session, with the environment ignored.
+
+        trust_env off stops .netrc and proxy settings from adding headers,
+        such as Authorization.
+        """
+        session = self._requests_session or requests.Session()
+        session.trust_env = False
+        self._requests_session = session
+        return session
 
     @property
     def http_headers(self) -> dict:
@@ -592,6 +673,7 @@ class GainsightStream(RESTStream):
             prepared_request,
             self.rate_limiter,
             self._tap.request_budget,  # type: ignore[attr-defined]
+            pinned_host=self.pinned_host,
             timeout=self.timeout,
         )
         self._write_request_duration_log(
@@ -606,7 +688,7 @@ class GainsightStream(RESTStream):
             json_or_none(response)
         ):
             message += ". Gainsight rejected the access key. Check `access_key` and `domain`"
-        return f"{message}. Body: {body_excerpt(response)}"
+        return f"{message}. Response: {response_summary(response)}"
 
     def is_empty_reply(self, response: requests.Response, payload: t.Any) -> bool:
         """Return True when a non-success reply means "no rows" for this stream."""
@@ -631,17 +713,17 @@ class GainsightStream(RESTStream):
         if payload is None:
             raise FatalAPIError(
                 f"{status}: the response for path {path} is not JSON. "
-                f"Body: {body_excerpt(response)}"
+                f"Response: {response_summary(response)}"
             )
         if is_unauthorized_payload(payload):
             raise FatalAPIError(
                 f"{status}: Gainsight rejected the access key for path {path}. "
-                f"Check `access_key` and `domain`. Body: {body_excerpt(response)}"
+                f"Check `access_key` and `domain`. Response: {response_summary(response)}"
             )
         if isinstance(payload, dict) and payload.get("result") is False:
             raise FatalAPIError(
                 f"{status}: Gainsight returned result=false for path {path}. "
-                f"Body: {body_excerpt(response)}"
+                f"Response: {response_summary(response)}"
             )
 
     def backoff_wait_generator(self) -> t.Generator[float, None, None]:

@@ -26,18 +26,19 @@ from tests.conftest import ACCESS_KEY, BASE_URL, CONFIG, load
     [
         ("acme.gainsightcloud.com", "https://acme.gainsightcloud.com"),
         ("https://acme.gainsightcloud.com", "https://acme.gainsightcloud.com"),
-        ("https://acme.gainsightcloud.com/", "https://acme.gainsightcloud.com"),
-        ("http://acme.gainsightcloud.com/v1/x", "https://acme.gainsightcloud.com"),
-        ("  acme.gainsightcloud.com  ", "https://acme.gainsightcloud.com"),
+        ("HTTPS://ACME.GainsightCloud.com", "https://acme.gainsightcloud.com"),
         ("acme", "https://acme.gainsightcloud.com"),
-        ("companyapi.yourcompany.com", "https://companyapi.yourcompany.com"),
+        ("eu.acme.gainsightcloud.com", "https://eu.acme.gainsightcloud.com"),
     ],
 )
 def test_normalize_domain(value, expected):
     assert normalize_domain(value) == expected
 
 
-@pytest.mark.parametrize("value", ["", "   ", "https://"])
+@pytest.mark.parametrize(
+    "value",
+    ["", "   ", "https://", "https://acme.gainsightcloud.com/", "  acme.gainsightcloud.com  ", "http://acme.gainsightcloud.com"],
+)
 def test_normalize_domain_rejects_empty(value):
     with pytest.raises(ValueError):
         normalize_domain(value)
@@ -206,7 +207,7 @@ def test_metadata_retries_429_then_succeeds(sleeps):
 def test_metadata_gives_up_after_max_tries():
     with requests_mock_lib.Mocker() as m:
         m.get(f"{BASE_URL}/v1/meta/services/objects/list", status_code=500, text="boom")
-        with pytest.raises(GainsightAPIError, match="500 from the object list: boom"):
+        with pytest.raises(GainsightAPIError, match="500 from the object list: HTTP 500, 4 bytes"):
             metadata_client().list_objects()
         assert m.call_count == client.MAX_TRIES
 

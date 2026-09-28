@@ -33,7 +33,6 @@ def body(payload):
     "method, path, payload",
     [
         ("GET", "/v1/meta/services/objects/list?po=company&em=false", None),
-        ("GET", "/v1/meta/services/objects/company/describe?ic=true&cl=0&idd=true", None),
         ("POST", "/v1/meta/services/objects/describe", load("describe_request.json")),
         ("GET", "/v1/meta/services/dropdowns/1I00K3A4X4T2UWD3COJ3FU0KMKYXZL9WEEFK", None),
         ("POST", "/v1/data/objects/query/Company", load("company_query_request.json")),
@@ -91,14 +90,15 @@ def test_a_refused_request_makes_no_network_call(monkeypatch):
     calls = []
     monkeypatch.setattr(requests.Session, "send", lambda self, request, **kw: calls.append(request))
     session = requests.Session()
+    session.trust_env = False
     for method, path in [("DELETE", "/v1/data/objects/Company/1P02"), ("POST", "/v1/data/objects/Company")]:
         prepared = session.prepare_request(requests.Request(method, BASE_URL + path, json={"records": [{}]}))
         with pytest.raises(safety().GainsightSafetyError):
-            safety().send(session, prepared, limiter=None)
+            safety().send(session, prepared, limiter=None, pinned_host="acme.gainsightcloud.com")
     # requests may normalize "..", so the dot trick is checked after that too.
     prepared = session.prepare_request(requests.Request("POST", BASE_URL + "/v1/data/objects/query/../Company", json={}))
     with pytest.raises(safety().GainsightSafetyError):
-        safety().send(session, prepared, limiter=None)
+        safety().send(session, prepared, limiter=None, pinned_host="acme.gainsightcloud.com")
     assert calls == []
 
 
@@ -163,7 +163,7 @@ def test_max_requests_per_minute_can_only_lower_the_limit(value):
 
 def test_max_requests_per_minute_sets_the_limiter(api):
     assert make_tap(max_requests_per_minute=30).rate_limiter.calls == 30
-    assert make_tap().rate_limiter.calls == 100
+    assert make_tap().rate_limiter.calls == 30
 
 
 def test_max_requests_must_be_positive():

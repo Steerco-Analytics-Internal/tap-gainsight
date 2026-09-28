@@ -4,7 +4,6 @@ import pytest
 import requests
 from singer_sdk.exceptions import FatalAPIError
 
-from tap_gainsight import client
 from tap_gainsight import tap as tap_module
 from tap_gainsight.client import GainsightAuthError
 from tap_gainsight.streams import CtaStream, ObjectPlan, lookup_columns
@@ -21,12 +20,25 @@ from tests.conftest import (
 )
 
 
-def test_long_error_bodies_are_cut_to_an_excerpt(api):
-    api.mocker.post(query_url("Company"), status_code=400, text="x" * 2000)
+def test_error_bodies_are_summarized_not_quoted(api):
+    api.mocker.post(query_url("Company"), status_code=400, text="x" * 2000, headers={"Content-Type": "text/plain"})
     with pytest.raises(FatalAPIError) as info:
         list(make_tap().streams["Company"].get_records(None))
-    assert "x" * client.BODY_EXCERPT_LENGTH + "..." in str(info.value)
-    assert "x" * (client.BODY_EXCERPT_LENGTH + 1) not in str(info.value)
+    assert "HTTP 400, 2000 bytes of text/plain" in str(info.value)
+    assert "xxxx" not in str(info.value)
+
+
+def test_error_desc_is_cut_before_interpolated_values_and_capped(api):
+    body = {"result": False, "errorCode": "GSOBJ_1005", "errorDesc": "Invalid dateTime format (Renewal_Date= 13-45-2020)"}
+    api.mocker.post(query_url("Company"), status_code=400, json=body)
+    with pytest.raises(FatalAPIError) as info:
+        list(make_tap().streams["Company"].get_records(None))
+    assert "errorCode GSOBJ_1005, errorDesc 'Invalid dateTime format'" in str(info.value)
+    assert "13-45-2020" not in str(info.value)
+    api.mocker.post(query_url("Company"), status_code=400, json={"result": False, "errorDesc": "y" * 500})
+    with pytest.raises(FatalAPIError) as info:
+        list(make_tap().streams["Company"].get_records(None))
+    assert "y" * 200 in str(info.value) and "y" * 201 not in str(info.value)
 
 
 def test_user_agent_setting_is_sent(api):

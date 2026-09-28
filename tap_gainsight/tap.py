@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import typing as t
 
 from singer_sdk import Stream, Tap
@@ -12,9 +13,11 @@ from tap_gainsight.client import (
     GainsightAPIError,
     GainsightAuthError,
     GainsightMetadataClient,
+    DEFAULT_REQUESTS_PER_MINUTE,
     RATE_LIMIT_CALLS,
     RateLimiter,
     load_zone,
+    pinned_host,
 )
 from tap_gainsight.safety import RequestBudget
 from tap_gainsight.streams import (
@@ -40,6 +43,7 @@ CANONICAL_NAMES = {
     "gsuser": "GsUser",
 }
 REQUIRED_OBJECT = "company"
+OBJECT_NAME = re.compile(r"^[A-Za-z0-9_]+$")
 TIMELINE_OBJECT = "activity_timeline"
 CTA_OBJECT = "cs_cta"
 
@@ -79,6 +83,15 @@ class TapGainsight(Tap):
             ),
         ),
         th.Property(
+            "custom_domain",
+            th.StringType,
+            description=(
+                "Only for a custom Gainsight domain, such as "
+                "companyapi.yourcompany.com. It must equal the `domain` host. "
+                "Hosts under gainsightcloud.com need no custom_domain."
+            ),
+        ),
+        th.Property(
             "start_date",
             th.DateTimeType,
             description="Earliest modified date to sync for incremental streams.",
@@ -96,9 +109,9 @@ class TapGainsight(Tap):
             "max_requests_per_minute",
             th.IntegerType,
             description=(
-                "Optional client-side request rate, from 1 to 100. Gainsight "
-                "documents 100 synchronous calls a minute, so the default is "
-                "100 and it can only be lowered."
+                "Optional client-side request rate, from 1 to 100. The default "
+                "is 30, well under Gainsight's documented 100 synchronous "
+                "calls a minute, to share the tenant's allowance."
             ),
         ),
         th.Property(
@@ -133,9 +146,18 @@ class TapGainsight(Tap):
         )
         problems: t.List[str] = []
         try:
+            pinned_host(self.config.get("domain"), self.config.get("custom_domain"))
+        except ValueError as exc:
+            problems.append(str(exc))
+        try:
             load_zone(self.config.get("filter_timezone"))
         except ValueError as exc:
             problems.append(str(exc))
+        if self.config.get("batch_config"):
+            problems.append(
+                "batch_config is not supported: this tap writes Singer messages "
+                "to stdout only."
+            )
         rate = self.config.get("max_requests_per_minute")
         if rate is not None and not (isinstance(rate, int) and 1 <= rate <= RATE_LIMIT_CALLS):
             problems.append(
@@ -155,7 +177,7 @@ class TapGainsight(Tap):
     @property
     def rate_limiter(self) -> RateLimiter:
         if self._rate_limiter is None:
-            calls = self.config.get("max_requests_per_minute") or RATE_LIMIT_CALLS
+            calls = self.config.get("max_requests_per_minute") or DEFAULT_REQUESTS_PER_MINUTE
             self._rate_limiter = RateLimiter(calls=min(int(calls), RATE_LIMIT_CALLS))
         return self._rate_limiter
 
@@ -271,6 +293,11 @@ class TapGainsight(Tap):
         listed_names: t.Dict[str, str] = {}
         for item in listed:
             name = str(item.get("objectName") or "")
+            if name and not OBJECT_NAME.match(name):
+                # A name must be safe in a URL path, and the SDK fills
+                # {placeholders} in paths from config.
+                self.logger.warning("Skipping object %r: not a plain API name.", name)
+                continue
             if name and item.get("readable") is not False:
                 listed_names[name.lower()] = name
 

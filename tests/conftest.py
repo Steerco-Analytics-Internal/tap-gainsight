@@ -471,3 +471,21 @@ def every_request_is_on_the_allowlist() -> t.Iterator[None]:
     assert SENT_REQUESTS, "The suite sent no requests, so the check proved nothing."
     for method, url, body in SENT_REQUESTS:
         check_request(method, url, body)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def no_real_network() -> t.Iterator[None]:
+    """Refuse every real socket connect, so no test can reach the network."""
+    import socket
+
+    original = socket.socket.connect
+
+    def refuse(self: socket.socket, address: t.Any) -> None:
+        raise OSError(f"Tests may not open real connections, but one tried {address!r}.")
+
+    socket.socket.connect = refuse  # type: ignore[method-assign]
+    try:
+        yield
+    finally:
+        socket.socket.connect = original  # type: ignore[method-assign]
+

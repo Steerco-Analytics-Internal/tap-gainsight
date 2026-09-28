@@ -499,8 +499,9 @@ def test_retries_give_up_with_the_status_and_body(api, name, status):
     spec = SPECS[name]
     serve(api, spec, [])
     api.mocker.post(spec.url, status_code=status, text="upstream says no")
-    with pytest.raises(RetriableAPIError, match=f"{status} .*Body: upstream says no"):
+    with pytest.raises(RetriableAPIError, match=f"{status} .*Response: HTTP {status}, 16 bytes") as info:
         records(make_tap().streams[name], spec)
+    assert "upstream says no" not in str(info.value)
     assert len(calls_to(api, spec.url)) == client.MAX_TRIES
 
 
@@ -509,7 +510,7 @@ def test_malformed_json_fails(api, name):
     spec = SPECS[name]
     serve(api, spec, [])
     api.mocker.post(spec.url, text="<html>maintenance</html>")
-    with pytest.raises(FatalAPIError, match="is not JSON.*maintenance"):
+    with pytest.raises(FatalAPIError, match="is not JSON.*24 bytes"):
         records(make_tap().streams[name], spec)
 
 
