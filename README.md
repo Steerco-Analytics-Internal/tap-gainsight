@@ -16,8 +16,29 @@ custom objects.
 
 The tap is read-only, and the code enforces it. Every HTTP request goes
 through one function, `send` in `tap_gainsight/safety.py`. Before any
-network I/O it checks the request against a fixed allowlist, and refuses
-anything else with `GainsightSafetyError`, whatever the config or catalog.
+network I/O it checks the destination, the headers, the method, the path
+and the body, and refuses anything else with `GainsightSafetyError`,
+whatever the config or catalog.
+
+### Pinned host
+
+The tap talks to one host, fixed at startup from the config:
+
+- `domain` must be a bare host, optionally after `https://`. User
+  information (`@`), ports, paths, queries, fragments, braces and whitespace
+  are rejected, and so is `http://`. A single label, such as `acme`, becomes
+  `acme.gainsightcloud.com`.
+- The host must match `^[a-z0-9-]+(\.[a-z0-9-]+)*\.gainsightcloud\.com$`,
+  ignoring case.
+- A custom Gainsight domain, such as `companyapi.yourcompany.com`, also
+  needs `custom_domain` set to the same host. Entering it twice makes it a
+  deliberate choice. IP addresses are refused.
+- `send` requires `https`, no user information, no explicit port, and a
+  host exactly equal to the pinned host.
+
+A bad `domain` fails config validation before any request.
+
+### Allowlist
 
 The allowlist (`READ_ONLY_ALLOWLIST`) holds only the documented read
 endpoints the tap uses:
@@ -25,7 +46,6 @@ endpoints the tap uses:
 | Method | Path | Query keys | Body keys |
 |---|---|---|---|
 | GET | `/v1/meta/services/objects/list` | `po`, `em` | none |
-| GET | `/v1/meta/services/objects/{object}/describe` | `ic`, `cl`, `idd`, `ihc`, `piec` | none |
 | POST | `/v1/meta/services/objects/describe` | none | `objectNames` and the describe flags |
 | GET | `/v1/meta/services/dropdowns/{categoryId}` | none | none |
 | POST | `/v1/data/objects/query/{object}` (also timeline and the delete logs) | none | `select`, `where`, `orderBy`, `limit`, `offset` |
@@ -41,24 +61,47 @@ The checks:
 - A GET has no body. A POST body is a JSON object with only the read keys
   above, and no `records`, `data`, `lookups` or `updateKeys` key anywhere in
   it.
+- Only these request headers are sent: `AccessKey`, `Content-Type`,
+  `Content-Length`, `User-Agent`, `Accept`, `Accept-Encoding` and
+  `Connection`. Any other, such as `Authorization` or a method-override
+  header, is refused.
+- Every session has `trust_env` off, so `.netrc` files and proxy settings
+  cannot add headers. `send` refuses a session with it on.
 - Redirects are never followed, so the access key never goes to another host.
-- `max_requests_per_minute` can lower the rate, and `max_requests` caps the
-  run.
-- Error messages may quote a response body, with any echoed access key
-  replaced by `***`. They never print record values.
+- Object names from the object list that are not plain identifiers are
+  skipped.
+- The default rate is 30 requests a minute, below Gainsight's documented
+  100, to share the tenant's allowance. `max_requests_per_minute` can set 1
+  to 100, and `max_requests` caps the run.
+- `batch_config` is rejected. The tap writes Singer messages to stdout only.
+
+### What errors and logs show
+
+Errors and logs never quote a response body or a record value. For the
+documented error shape, they show the HTTP status, `errorCode` or `title`,
+and `errorDesc` cut before its first `=`, `:` or `(` and capped at 200
+characters. Gainsight's error templates put values after those characters,
+as in "Invalid dateTime format (%s(columnName)= %s(columnValue))". For any
+other body, they show only its length and content type. An unexpected
+response shape is described by its key names and types. Any echoed access
+key is replaced by `***`.
+
+### Tests
 
 The test suite records every request it sends and checks each one against
-the allowlist at the end of the run.
+the allowlist at the end of the run. It also refuses every real socket
+connection, so no test can reach the network.
 
 ## Configuration
 
 | Setting | Required | Description |
 |---|---|---|
 | `access_key` | Yes | Gainsight REST API Access Key. The tap sends it in the `AccessKey` header. It is a secret. |
-| `domain` | Yes | Tenant base URL or subdomain, such as `acme.gainsightcloud.com`. The scheme is optional. The tap always uses `https://<host>`. A bare name with no dot, such as `acme`, becomes `acme.gainsightcloud.com`. |
+| `domain` | Yes | Tenant host under gainsightcloud.com, such as `acme.gainsightcloud.com`, optionally after `https://`. A bare name with no dot, such as `acme`, becomes `acme.gainsightcloud.com`. See [Pinned host](#pinned-host). |
+| `custom_domain` | No | Only for a custom Gainsight domain, such as `companyapi.yourcompany.com`. It must equal the `domain` host. |
 | `start_date` | No | ISO 8601 date-time. The earliest modified date for incremental streams on their first run. |
 | `filter_timezone` | No | IANA time zone name, such as `America/Los_Angeles`. Set it only when the tenant reads query filter times in its local time zone. Query API and delete log filter values are then sent in that zone, with its daylight saving rules. Unset means UTC. An unknown name fails config validation. See [Filter time zone](#filter-time-zone). |
-| `max_requests_per_minute` | No | Client-side request rate, from 1 to 100. The default is 100, the documented limit. It can only be lowered. |
+| `max_requests_per_minute` | No | Client-side request rate, from 1 to 100. The default is 30, below Gainsight's documented 100, to share the tenant's allowance with other integrations. |
 | `max_requests` | No | Hard cap on requests in one run, retries and discovery included. The run stops with an error when it is reached. |
 | `objects` | No | Allowlist of MDA object API names, such as `["Person", "Renewal__gc"]`. When set, only `Company` and these objects get a stream. When not set, every readable object gets a stream. |
 
@@ -238,8 +281,8 @@ When a run gets a catalog, the tap compares it with that discovery:
   value is read in, so every first filter starts 24 hours before its
   bookmark or `start_date`. Targets dedupe the overlap by key.
 - **Rate limits.** Gainsight documents 100 synchronous calls per minute.
-  The tap has one client-side limiter for all streams and metadata calls.
-  Retries count against it.
+  The tap sends at most 30 a minute by default, through one client-side
+  limiter for all streams and metadata calls. Retries count against it.
 - **Retries.** HTTP 429, 5xx, connection errors and timeouts back off
   exponentially, up to 8 tries and 60 seconds a wait. The stream then fails.
 - **Redirects.** The tap never follows a redirect, because `requests` would
@@ -247,7 +290,7 @@ When a run gets a catalog, the tap compares it with that discovery:
   pointed to.
 - **Errors.** Any other 4xx fails the stream at once. So does a 200 whose
   body has `result: false`, a body that is not JSON, or a `data` shape the
-  docs do not show. The error includes the status and a body excerpt. The
+  docs do not show. The error includes the status and a response summary. The
   documented empty replies count as an empty page at HTTP 200 or any 4xx:
   "No data found for given criteria" and GSOBJ_1011 "No entity matches the
   given criteria", which the Error Codes article lists as HTTP 400.
