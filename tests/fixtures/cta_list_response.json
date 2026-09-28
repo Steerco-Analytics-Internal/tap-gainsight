@@ -1,0 +1,91 @@
+{
+    "result": true,
+    "errorCode": null,
+    "errorDesc": null,
+    "requestId": "f742e83d-4af3-4285-bd20-48686a2b3e17",
+    "data": [
+        {
+            "CompanyId": "1P02ZUWNMOPV5SZ6ZLG7TZJMDCB8QNDDCACX",
+            "CompanyId__gr.Arr": 998765.00000000000,
+            "CompanyId__gr.Company_Test_Field__gc": "Company test field",
+            "CompanyId__gr.CreatedBy": "1P015825RVB81GPY5OJQ2I4OLHR6DNBOYVZU",
+            "CompanyId__gr.CurrencyIsoCode": "USD",
+            "CompanyId__gr.Name": "IBM",
+            "DueDate": "2020-04-14T11:30:00Z",
+            "EntityType": "COMPANY",
+            "Gsid": "1S01B8KR0ST6J5HC5N9X9GVU1LXJCHOYG7IS",
+            "IsClosed": false,
+            "IsImportant": false,
+            "Name": "Tomorrow",
+            "OwnerId": "1P015825RVB81GPY5OTDQ4GYW31IZC14GWQR",
+            "OwnerId__gr.FirstName": "Hitesh",
+            "OwnerId__gr.LastName": "Sharma",
+            "OwnerId__gr.User_Number__gc": 56738,
+            "PriorityId": "1I0016MVH7ECQMT12KZPJI2HPSK7AC2E4VCR",
+            "PriorityId__gr.IsActive": true,
+            "PriorityId__gr.Name": "Medium",
+            "ReasonId": "1I003F6D392Y2KJ97AYOAB5WH6C1RSE1XT0E",
+            "ReasonId__gr.Name": "Other",
+            "StatusId": "1I0017YS8AFRMU8633PP4GQ7M1OFAHSBMCK0",
+            "StatusId__gr.Name": "New",
+            "TypeId": "1I00650WACZ7F0X9HR1K21ZPDOQ71DFE4KFG",
+            "TypeId__gr.Name": "Risk",
+            "associatedRecords": [
+                {
+                    "recordId": "1Z02G2ZIY14G9VKJ2NW0N6VN0EQE780AR0HZ",
+                    "objectName": "customobject__gc",
+                    "source": "MDA"
+                }
+            ]
+        },
+        {
+            "CompanyId": "1P02ZUWNMOPV5SZ6ZLG7TZJMDCB8QNDDCACX",
+            "CompanyId__gr.Arr": 998765.00000000000,
+            "CompanyId__gr.Company_Test_Field__gc": "Company test field for string filters to do the test",
+            "CompanyId__gr.CreatedBy": "1P015825RVB81GPY5OJQ2I4OLHR6DNBOYVZU",
+            "CompanyId__gr.CurrencyIsoCode": "USD",
+            "CompanyId__gr.Name": "IBM",
+            "CustomDateTime__gc": "2020-04-17T22:00:00Z",
+            "CustomDate__gc": "2020-04-22",
+            "Custom_picklist__gc": "1I0054U9FAKXZ0H26HCDNCOD7NQT456P7RJL",
+            "DueDate": "2020-04-14T11:30:00Z",
+            "EntityType": "COMPANY",
+            "Gsid": "1S01B8KR0ST6J5HC5NFP4LHLPQK80RWOD1NJ",
+            "IsClosed": false,
+            "IsImportant": false,
+            "Name": "Today",
+            "Name_Lookup1__gc": "IBM",
+            "Name_Lookup1__gr.ModifiedDate": "2020-04-14T09:21:25.612Z",
+            "Name_Lookup1__gr.Name": "IBM",
+            "OwnerId": "1P015825RVB81GPY5OTDQ4GYW31IZC14GWQR",
+            "OwnerId__gr.FirstName": "Hitesh",
+            "OwnerId__gr.LastName": "Sharma",
+            "OwnerId__gr.User_Number__gc": 56738,
+            "PriorityId": "1I0016MVH7ECQMT12KZPJI2HPSK7AC2E4VCR",
+            "PriorityId__gr.IsActive": true,
+            "PriorityId__gr.Name": "Medium",
+            "ReasonId": "1I003F6D392Y2KJ97AYOAB5WH6C1RSE1XT0E",
+            "ReasonId__gr.Name": "Other",
+            "StatusId": "1I0017YS8AFRMU8633PP4GQ7M1OFAHSBMCK0",
+            "StatusId__gr.Name": "New",
+            "TypeId": "1I00650WACZ7F0X9HR1K21ZPDOQ71DFE4KFG",
+            "TypeId__gr.Name": "Risk",
+            "User_Lookup__gc": "1P015825RVB81GPY5OTDQ4GYW31IZC14GWQR",
+            "User_Lookup__gr.ModifiedDate": "2020-04-14T09:22:03.178Z",
+            "User_Lookup__gr.Name": "Hitesh Sharma",
+            "associatedRecords": [
+                {
+                    "recordId": "5002v00002ikxl0AAA",
+                    "objectName": "Case",
+                    "source": "SFDC"
+                },
+                {
+                    "recordId": "1Z02G2ZIY14G9VKJ2NW0N6VN0EQE780AR0HZ",
+                    "objectName": "customobject__gc",
+                    "source": "MDA"
+                }
+            ]
+        }
+    ],
+    "message": null
+}

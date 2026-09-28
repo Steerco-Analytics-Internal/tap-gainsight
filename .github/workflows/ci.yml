@@ -18,5 +18,7 @@ jobs:
       - run: pip install --upgrade pip
       - run: pip install poetry==1.6.1
       - run: poetry install --no-interaction --no-root
-      - run: poetry run python -m compileall -q tap_template
+      - run: poetry run python -m compileall -q tap_gainsight
+      - run: poetry run python -m tap_gainsight.tap --about
+      # Runs the full suite. pyproject.toml adds coverage and fails under 90%.
       - run: poetry run pytest -q

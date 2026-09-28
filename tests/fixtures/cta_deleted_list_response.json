@@ -1,0 +1,50 @@
+{
+    "result": true,
+    "requestId": "63a3e445-2628-491c-96d4-3d7b147493f6",
+    "data": [
+        {
+            "CompanyId": "1P02BVHREJTPN50SVS1B4WZSUAG42IPC4TC1",
+            "DueDate": "2024-02-19",
+            "EntityType": "COMPANY",
+            "Gsid": "1S010QR484IE2OS5VOC2M0MM1UILLQ6EGWKB",
+            "IsClosed": false,
+            "ModifiedById": "1P019WYNGFXGSE02CREUC1HNPDCVFGFLDS3X",
+            "ModifiedDate": "2024-02-05T08:34:35.253Z",
+            "Name": "Test Company CTA by KMK",
+            "OwnerId": "1P019WYNGFXGSE02CREUC1HNPDCVFGFLDS3X",
+            "OwnerId__gr.Email": "sthakuria@gainsight.com",
+            "OwnerId__gr.Name": "Sweta Thakuria",
+            "PriorityId": "1I0016MVH7ECQMT12K40VI5F1I95JN2TUI3H",
+            "PriorityId__gr.Name": "High",
+            "ReasonId": "1I003F6D392Y2KJ97ALK1STOS6L1LBOR8SX0",
+            "ReasonId__gr.Name": "Usage Drop",
+            "StatusId": "1I0017YS8AFRMU863300P15XSN8EK5G0T0BE",
+            "StatusId__gr.Name": "New",
+            "TypeId": "1I00650WACZ7F0X9HRSYMBZBFJ74MHB3BR6G",
+            "TypeId__gr.Name": "Risk"
+        },
+        {
+            "CompanyId": "1P02BVHREJTPN50SVS1B4WZSUAG42IPC4TC1",
+            "DueDate": "2024-02-15",
+            "EntityType": "COMPANY",
+            "Gsid": "1S010QR484IE2OS5VOOHH3HZ87LCJA4URNJ7",
+            "IsClosed": false,
+            "ModifiedById": "1P019WYNGFXGSE02CREUC1HNPDCVFGFLDS3X",
+            "ModifiedDate": "2024-02-05T08:38:22.234Z",
+            "Name": "Test Company CTA KMK 2",
+            "OwnerId": "1P019WYNGFXGSE02CREUC1HNPDCVFGFLDS3X",
+            "OwnerId__gr.Email": "sthakuria@gainsight.com",
+            "OwnerId__gr.Name": "Sweta Thakuria",
+            "PriorityId": "1I0016MVH7ECQMT12K40VI5F1I95JN2TUI3H",
+            "PriorityId__gr.Name": "High",
+            "ReasonId": "1I003F6D392Y2KJ97AZAYV5SOPE97YQT557Y",
+            "ReasonId__gr.Name": "Survey Response",
+            "StatusId": "1I0017YS8AFRMU863300P15XSN8EK5G0T0BE",
+            "StatusId__gr.Name": "New",
+            "TypeId": "1I00650WACZ7F0X9HRSYMBZBFJ74MHB3BR6G",
+            "TypeId__gr.Name": "Risk"
+        }
+    ],
+    "pageSize": 100,
+    "currentPageNum": 1
+}

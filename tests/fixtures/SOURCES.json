@@ -1,0 +1,119 @@
+{
+  "company_query_no_data_response.json": {
+    "source": "https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Company_and_Relationship_API/Company_API_Documentation",
+    "section": "Read API, Sample Failure Response",
+    "verbatim": true
+  },
+  "company_query_request.json": {
+    "source": "https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Company_and_Relationship_API/Company_API_Documentation",
+    "section": "Read API, Sample Request Body",
+    "verbatim": true
+  },
+  "company_query_response.json": {
+    "source": "https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Company_and_Relationship_API/Company_API_Documentation",
+    "section": "Read API, Sample Success Response",
+    "verbatim": true
+  },
+  "cta_deleted_list_request.json": {
+    "source": "https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Cockpit_API/Retrieve_Deleted_Data_API",
+    "section": "CTA, Request",
+    "verbatim": true
+  },
+  "cta_deleted_list_response.json": {
+    "source": "https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Cockpit_API/Retrieve_Deleted_Data_API",
+    "section": "CTA, Response",
+    "verbatim": true
+  },
+  "cta_list_invalid_select_response.json": {
+    "source": "https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Cockpit_API/Call_To_Action_(CTA)_API_Documentation",
+    "section": "Fetch CTA API, Sample Failure Responses, Invalid fields in Select clause",
+    "verbatim": true
+  },
+  "cta_list_request.json": {
+    "source": "https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Cockpit_API/Call_To_Action_(CTA)_API_Documentation",
+    "section": "Fetch CTA API, Sample Request",
+    "verbatim": false,
+    "repair": "Removes the // comments the docs put inside the JSON. tests/test_fixtures.py checks this is the only change."
+  },
+  "cta_list_request.verbatim.txt": {
+    "source": "https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Cockpit_API/Call_To_Action_(CTA)_API_Documentation",
+    "section": "Fetch CTA API, Sample Request",
+    "verbatim": true
+  },
+  "cta_list_response.json": {
+    "source": "https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Cockpit_API/Call_To_Action_(CTA)_API_Documentation",
+    "section": "Fetch CTA API, Sample Success Response",
+    "verbatim": true
+  },
+  "custom_object_query_empty_response.json": {
+    "source": "https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Custom_Object_API/Gainsight_Custom_Object_API_Documentation",
+    "section": "Read API, Sample Failure Response (an empty result)",
+    "verbatim": true
+  },
+  "custom_object_query_request.json": {
+    "source": "https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Custom_Object_API/Gainsight_Custom_Object_API_Documentation",
+    "section": "Read API, Sample Request Body",
+    "verbatim": true
+  },
+  "custom_object_query_response.json": {
+    "source": "https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Custom_Object_API/Gainsight_Custom_Object_API_Documentation",
+    "section": "Read API, Sample Success Response",
+    "verbatim": true
+  },
+  "delete_log_request.json": {
+    "source": "https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Data_Management_APIs/Data_Management_APIs",
+    "section": "Retrieve Deleted Data API, Sample Request",
+    "verbatim": true
+  },
+  "delete_log_response.json": {
+    "source": "https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Data_Management_APIs/Data_Management_APIs",
+    "section": "Retrieve Deleted Data API, Sample Response",
+    "verbatim": true
+  },
+  "describe_not_found_response.json": {
+    "source": "https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Data_Management_APIs/Data_Management_APIs",
+    "section": "Get Describe OMD, Sample Failure Response",
+    "verbatim": true
+  },
+  "describe_request.json": {
+    "source": "https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Data_Management_APIs/Data_Management_APIs",
+    "section": "Post Describe OMD, Sample Request",
+    "verbatim": true
+  },
+  "describe_response.json": {
+    "source": "https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Data_Management_APIs/Data_Management_APIs",
+    "section": "Post Describe OMD, Sample Success Response",
+    "verbatim": false,
+    "repair": "Adds the one comma missing after \"sourceType\": \"STRING\" in the first field. tests/test_fixtures.py checks this is the only change."
+  },
+  "describe_response.verbatim.txt": {
+    "source": "https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Data_Management_APIs/Data_Management_APIs",
+    "section": "Post Describe OMD, Sample Success Response",
+    "verbatim": true
+  },
+  "dropdown_response.json": {
+    "source": "https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Data_Management_APIs/Data_Management_APIs",
+    "section": "Get API - categoryID, Sample Response",
+    "verbatim": true
+  },
+  "object_list_response.json": {
+    "source": "https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Data_Management_APIs/Data_Management_APIs",
+    "section": "Get Lite API Call OMD, Sample Success Response",
+    "verbatim": true
+  },
+  "timeline_query_request.json": {
+    "source": "https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Timeline_API/Timeline_APIs",
+    "section": "Read API, Sample Request Body",
+    "verbatim": true
+  },
+  "timeline_query_response.json": {
+    "source": "https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Timeline_API/Timeline_APIs",
+    "section": "Read API, Sample Response Body",
+    "verbatim": true
+  },
+  "unauthorized_response.json": {
+    "source": "https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Data_Management_APIs/Data_Management_APIs",
+    "section": "Get API - categoryID, Sample Failure Response",
+    "verbatim": true
+  }
+}

@@ -1,15 +1,21 @@
-"""Smoke tests. Expand once you've customized the streams."""
+"""Smoke tests for the tap class."""
 
-from tap_template.tap import TapTemplate
-
-
-def test_tap_instantiates():
-    tap = TapTemplate(config={"api_key": "test"}, parse_env_config=False)
-    assert tap.name == "tap-template"
+from tap_gainsight.tap import TapGainsight
+from tests.conftest import make_tap
 
 
-def test_streams_discoverable():
-    tap = TapTemplate(config={"api_key": "test"}, parse_env_config=False)
-    streams = tap.discover_streams()
-    assert len(streams) >= 1
+def test_tap_instantiates(api):
+    tap = make_tap()
+    assert tap.name == "tap-gainsight"
+
+
+def test_streams_discoverable(api):
+    streams = make_tap().discover_streams()
+    assert len(streams) >= 4
     assert all(s.name for s in streams)
+
+
+def test_access_key_is_a_secret():
+    schema = TapGainsight.config_jsonschema["properties"]["access_key"]
+    assert schema.get("secret") is True
+    assert TapGainsight.config_jsonschema["required"] == ["access_key", "domain"]

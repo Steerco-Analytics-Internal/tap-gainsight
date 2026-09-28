@@ -1,0 +1,39 @@
+{
+    "select": [          
+        "name",
+        "customDate__gc",             // Additional Custom Field
+        "CompanyId__gr.Name",         // Get data from lookup fields
+        "CompanyId__gr.Arr",
+        "CompanyId__gr.Csm_gr.Email", // Second level lookup fields
+        "Comments",
+        "Days Due",
+        "Quoted_ARR__gc",
+        "custom_picklist__gc",
+        "Renewal_Date__gc"
+    ],
+    "linkedObject": true,             //Fetch Linked Objects Data as well
+    "where": {                        //Filter Conditions
+        "conditions": [
+        {
+          "associatedRecord": true,   //Filter based on Linked Objects
+          "value": [
+              "5002v00002ikxl0AAA",
+              "1Z02G2ZIY14G9VKJ2NW0N6VN0EQE780AR0HZ"
+          ],
+          "alias": "A",
+          "operator": "INCLUDES"
+        },
+        {
+          "fieldName": "DueDate",
+          "value": [
+              "2020-04-14"
+            ],
+            "alias": "B",
+            "operator": "EQ"
+            }
+        ],
+        "expression": "A AND B"
+    },
+    "pageSize": 100,
+    "pageNumber": 1
+}

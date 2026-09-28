@@ -1,0 +1,7 @@
+{
+    "result": false,
+    "errorCode": "GS_APIG_2401",
+    "errorDesc": "Unauthorized",
+    "requestId": "0a719c1a-2705-4a3e-82ba-aa14beeba64e",
+    "message": "Unauthorized"
+}

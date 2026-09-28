@@ -1,0 +1,8 @@
+{
+    "result": false,
+    "errorCode": "COCKPIT_5101",
+    "errorDesc": "Invalid fields in select clause - gsidasdf",
+    "requestId": "255a29ce-faa8-4a6f-b91a-6c446ade7037",
+    "data": {},
+    "message": null
+}
