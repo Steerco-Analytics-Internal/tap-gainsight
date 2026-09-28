@@ -499,7 +499,7 @@ def test_retries_give_up_with_the_status_and_body(api, name, status):
     spec = SPECS[name]
     serve(api, spec, [])
     api.mocker.post(spec.url, status_code=status, text="upstream says no")
-    with pytest.raises(RetriableAPIError, match=f"{status} .*Response: HTTP {status}, 16 bytes") as info:
+    with pytest.raises(RetriableAPIError, match=f"{status} .*Response: HTTP {status}, a 16-byte body") as info:
         records(make_tap().streams[name], spec)
     assert "upstream says no" not in str(info.value)
     assert len(calls_to(api, spec.url)) == client.MAX_TRIES
@@ -510,7 +510,7 @@ def test_malformed_json_fails(api, name):
     spec = SPECS[name]
     serve(api, spec, [])
     api.mocker.post(spec.url, text="<html>maintenance</html>")
-    with pytest.raises(FatalAPIError, match="is not JSON.*24 bytes"):
+    with pytest.raises(FatalAPIError, match="is not JSON.*a 24-byte body"):
         records(make_tap().streams[name], spec)
 
 
@@ -525,7 +525,7 @@ def test_other_4xx_fails_with_status_and_body(api, name):
 
 def test_documented_cta_error_on_200_fails(api):
     api.mocker.post(CTA_URL, json=load("cta_list_invalid_select_response.json"))
-    with pytest.raises(FatalAPIError, match="result=false.*Invalid fields in select clause"):
+    with pytest.raises(FatalAPIError, match="result=false.*errorCode COCKPIT_5101 \\(the CTA request is invalid\\)"):
         list(make_tap().streams["cta"].get_records(None))
 
 

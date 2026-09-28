@@ -230,7 +230,7 @@ def test_the_access_key_and_record_values_never_reach_logs_or_errors(api, tmp_pa
     # The sync fails on the cta error, after Company synced.
     assert sync.exception is not None
     error_text = str(sync.exception)
-    assert "***" in error_text
+    assert "errorCode GSOBJ_1002" in error_text
     for text in (discover.stdout, discover.stderr, sync.stderr, caplog.text, error_text):
         assert SENTINEL_KEY not in text
     assert SENTINEL_KEY not in sync.stdout

@@ -207,7 +207,7 @@ def test_metadata_retries_429_then_succeeds(sleeps):
 def test_metadata_gives_up_after_max_tries():
     with requests_mock_lib.Mocker() as m:
         m.get(f"{BASE_URL}/v1/meta/services/objects/list", status_code=500, text="boom")
-        with pytest.raises(GainsightAPIError, match="500 from the object list: HTTP 500, 4 bytes"):
+        with pytest.raises(GainsightAPIError, match="500 from the object list: HTTP 500, a 4-byte body"):
             metadata_client().list_objects()
         assert m.call_count == client.MAX_TRIES
 

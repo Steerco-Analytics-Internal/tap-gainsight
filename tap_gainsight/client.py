@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import collections
 import datetime
+import http.cookiejar
 import re
 import threading
 import time
@@ -160,7 +161,7 @@ def pinned_host(domain: str, custom_domain: t.Optional[str] = None) -> str:
     """
     raw = domain if isinstance(domain, str) else ""
     host = raw[len("https://"):] if raw.lower().startswith("https://") else raw
-    if not host or not _BARE_HOST_CHARS.match(host):
+    if not host or not _BARE_HOST_CHARS.fullmatch(host):
         raise ValueError(
             f"The `domain` setting {domain!r} is not a bare host. Use a host such "
             "as acme.gainsightcloud.com, optionally after https://, with no "
@@ -169,7 +170,7 @@ def pinned_host(domain: str, custom_domain: t.Optional[str] = None) -> str:
     host = host.lower()
     if "." not in host:
         host = f"{host}{DEFAULT_HOST_SUFFIX}"
-    if GAINSIGHT_HOST.match(host):
+    if GAINSIGHT_HOST.fullmatch(host):
         return host
     if custom_domain is not None:
         custom = str(custom_domain).lower()
@@ -178,7 +179,7 @@ def pinned_host(domain: str, custom_domain: t.Optional[str] = None) -> str:
                 f"The `custom_domain` setting {custom_domain!r} must equal the "
                 f"`domain` host {host!r}."
             )
-        if not CUSTOM_HOST.match(host):
+        if not CUSTOM_HOST.fullmatch(host):
             raise ValueError(f"The custom domain {host!r} is not a host name.")
         return host
     raise ValueError(
@@ -192,44 +193,59 @@ def normalize_domain(domain: str, custom_domain: t.Optional[str] = None) -> str:
     return f"https://{pinned_host(domain, custom_domain)}"
 
 
-# errorDesc templates interpolate values after "=", ":" or "(", as in
+# Fixed descriptions for the error codes the tap handles. errorDesc is
+# never logged: Gainsight's templates put record values in it, as in
 # GSOBJ_1005 "Invalid dateTime format (%s(columnName)= %s(columnValue))".
-_ERROR_DESC_CUT = re.compile(r"[=:(]")
-ERROR_DESC_LENGTH = 200
+KNOWN_ERRORS = {
+    "GSOBJ_1011": "no rows match the criteria",
+    "GSOBJ_1005": "a date or date-time value has an invalid format",
+    "GSOBJ_1023": "the API path is invalid",
+    "GSOBJ_1024": "the authorization headers are invalid",
+    "GS_APIG_2401": "the access key was rejected",
+    "COCKPIT_5101": "the CTA request is invalid",
+    "OBJECT_NOT_FOUND": "the object was not found",
+}
+# A code is capitals, digits and underscores, up to 50 characters.
+_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,49}")
+
+
+def _code_field(name: str, value: t.Any) -> str:
+    """Describe an errorCode or title without echoing anything else."""
+    if not isinstance(value, str):
+        return f"{name} of type {type(value).__name__}"
+    if not _CODE.fullmatch(value):
+        return f"{name} that is not a code ({len(value)} characters)"
+    known = KNOWN_ERRORS.get(value)
+    return f"{name} {value} ({known})" if known else f"{name} {value}"
 
 
 def response_summary(response: requests.Response) -> str:
     """Describe an error response without its data.
 
-    For the documented error shape: the status, `errorCode` or `title`, and
-    `errorDesc`
-    cut before the first "=", ":" or "(" and capped at 200 characters, so
-    interpolated values are dropped. Otherwise: the status, the body length
-    and the content type. An access key the text echoes becomes `***`.
+    For the documented error shape: the status, and `errorCode` and `title`
+    when each is a code of up to 50 capitals, digits and underscores. A
+    known code adds the tap's own fixed description. Any other value gives
+    only its type or length. `errorDesc` is never included. For any other
+    body: the status and the body length.
     """
     payload = json_or_none(response)
     parts = [f"HTTP {response.status_code}"]
     if isinstance(payload, dict) and ({"errorCode", "errorDesc", "title"} & set(payload)):
-        if payload.get("errorCode") is not None:
-            parts.append(f"errorCode {str(payload.get('errorCode'))[:50]}")
-        # Data Management failure samples carry a code in "title", such as
-        # OBJECT_NOT_FOUND.
-        if payload.get("title") is not None:
-            parts.append(f"title {str(payload.get('title'))[:50]}")
-        desc = str(payload.get("errorDesc") or "")
-        desc = _ERROR_DESC_CUT.split(desc, 1)[0].strip()[:ERROR_DESC_LENGTH]
-        if desc:
-            parts.append(f"errorDesc {desc!r}")
+        for name in ("errorCode", "title"):
+            if payload.get(name) is not None:
+                parts.append(_code_field(name, payload[name]))
     else:
-        length = len(response.content or b"")
-        kind = response.headers.get("Content-Type") or "unknown content type"
-        parts.append(f"{length} bytes of {kind}")
+        parts.append(f"a {len(response.content or b'')}-byte body")
     text = ", ".join(parts)
+    # A code-shaped access key could pass the code check. Redact it anyway.
     request = getattr(response, "request", None)
     key = request.headers.get("AccessKey") if request is not None else None
-    if key:
-        text = text.replace(key, "***")
-    return text
+    return text.replace(key, "***") if key else text
+
+
+def refuse_cookies(session: requests.Session) -> None:
+    """Never store or send a cookie, such as a load balancer's AWSALB."""
+    session.cookies.set_policy(http.cookiejar.DefaultCookiePolicy(allowed_domains=[]))
 
 
 def json_or_none(response: requests.Response) -> t.Any:
@@ -240,6 +256,12 @@ def json_or_none(response: requests.Response) -> t.Any:
         return None
 
 
+def _code(payload: dict) -> t.Optional[str]:
+    """Return errorCode when it is a string. A list or object is not a code."""
+    code = payload.get("errorCode")
+    return code if isinstance(code, str) else None
+
+
 def is_no_data_response(payload: t.Any) -> bool:
     """Return True for a documented `result: false` empty reply.
 
@@ -247,7 +269,7 @@ def is_no_data_response(payload: t.Any) -> bool:
     """
     if not isinstance(payload, dict) or payload.get("result") is not False:
         return False
-    if payload.get("errorCode") in NO_DATA_ERROR_CODES:
+    if _code(payload) in NO_DATA_ERROR_CODES:
         return True
     desc = str(payload.get("errorDesc") or "").lower()
     return any(text in desc for text in NO_DATA_ERROR_DESCS)
@@ -263,7 +285,7 @@ def is_object_not_found(payload: t.Any) -> bool:
 
 def is_unauthorized_payload(payload: t.Any) -> bool:
     """Return True when a body carries a documented authorization error code."""
-    return isinstance(payload, dict) and payload.get("errorCode") in AUTH_ERROR_CODES
+    return isinstance(payload, dict) and _code(payload) in AUTH_ERROR_CODES
 
 
 def redirect_message(response: requests.Response, label: str) -> str:
@@ -338,7 +360,7 @@ def parse_api_datetime(value: t.Any) -> t.Optional[datetime.datetime]:
         return None
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return EPOCH + datetime.timedelta(milliseconds=value)
-    match = _DATE_TEXT.match(str(value).strip())
+    match = _DATE_TEXT.fullmatch(str(value).strip())
     if not match:
         raise ValueError(f"Unrecognized date value: {value!r}")
     year, month, day, hour, minute, second, fraction, offset = match.groups()
@@ -481,6 +503,7 @@ class GainsightMetadataClient:
         self.session = session or requests.Session()
         # No .netrc or proxy settings: they could add an Authorization header.
         self.session.trust_env = False
+        refuse_cookies(self.session)
         # Docs: pass the access key in the "accesskey" header. Header names
         # are case-insensitive in HTTP.
         self.session.headers.update(
@@ -644,6 +667,7 @@ class GainsightStream(RESTStream):
         """
         session = self._requests_session or requests.Session()
         session.trust_env = False
+        refuse_cookies(session)
         self._requests_session = session
         return session
 

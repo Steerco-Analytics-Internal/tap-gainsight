@@ -153,6 +153,13 @@ class TapGainsight(Tap):
             load_zone(self.config.get("filter_timezone"))
         except ValueError as exc:
             problems.append(str(exc))
+        objects = self.config.get("objects") or []
+        bad_names = [name for name in objects if not (isinstance(name, str) and OBJECT_NAME.fullmatch(name))]
+        if bad_names:
+            problems.append(
+                f"objects holds names that are not plain API names: {bad_names!r}. "
+                "Use letters, digits and underscores only."
+            )
         if self.config.get("batch_config"):
             problems.append(
                 "batch_config is not supported: this tap writes Singer messages "
@@ -293,7 +300,7 @@ class TapGainsight(Tap):
         listed_names: t.Dict[str, str] = {}
         for item in listed:
             name = str(item.get("objectName") or "")
-            if name and not OBJECT_NAME.match(name):
+            if name and not OBJECT_NAME.fullmatch(name):
                 # A name must be safe in a URL path, and the SDK fills
                 # {placeholders} in paths from config.
                 self.logger.warning("Skipping object %r: not a plain API name.", name)

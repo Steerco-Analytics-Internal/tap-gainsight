@@ -24,21 +24,17 @@ def test_error_bodies_are_summarized_not_quoted(api):
     api.mocker.post(query_url("Company"), status_code=400, text="x" * 2000, headers={"Content-Type": "text/plain"})
     with pytest.raises(FatalAPIError) as info:
         list(make_tap().streams["Company"].get_records(None))
-    assert "HTTP 400, 2000 bytes of text/plain" in str(info.value)
-    assert "xxxx" not in str(info.value)
+    assert "HTTP 400, a 2000-byte body" in str(info.value)
+    assert "xxxx" not in str(info.value) and "text/plain" not in str(info.value)
 
 
-def test_error_desc_is_cut_before_interpolated_values_and_capped(api):
+def test_known_codes_get_fixed_descriptions_and_error_desc_is_dropped(api):
     body = {"result": False, "errorCode": "GSOBJ_1005", "errorDesc": "Invalid dateTime format (Renewal_Date= 13-45-2020)"}
     api.mocker.post(query_url("Company"), status_code=400, json=body)
     with pytest.raises(FatalAPIError) as info:
         list(make_tap().streams["Company"].get_records(None))
-    assert "errorCode GSOBJ_1005, errorDesc 'Invalid dateTime format'" in str(info.value)
-    assert "13-45-2020" not in str(info.value)
-    api.mocker.post(query_url("Company"), status_code=400, json={"result": False, "errorDesc": "y" * 500})
-    with pytest.raises(FatalAPIError) as info:
-        list(make_tap().streams["Company"].get_records(None))
-    assert "y" * 200 in str(info.value) and "y" * 201 not in str(info.value)
+    assert "errorCode GSOBJ_1005 (a date or date-time value has an invalid format)" in str(info.value)
+    assert "Invalid dateTime" not in str(info.value) and "13-45-2020" not in str(info.value)
 
 
 def test_user_agent_setting_is_sent(api):
