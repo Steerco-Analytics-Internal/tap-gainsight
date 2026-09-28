@@ -5,10 +5,10 @@ import json
 from click.testing import CliRunner
 
 from tap_gainsight.tap import TapGainsight
-from tests.conftest import BASE_URL, CONFIG, load, query_page, query_url
-from tests.test_streams import company_row, cta_row, timeline_row
+from tests.conftest import BASE_URL, CONFIG, QueryEngine, load, query_url
+from tests.test_streams import company_row, cta_deleted_row, cta_row, timeline_row
 
-SYNCED = ["Company", "timeline", "cta", "deleted_records"]
+SYNCED = ["Company", "timeline", "cta", "cta_deleted", "deleted_records"]
 
 
 def run(args):
@@ -23,7 +23,7 @@ def parse(stdout):
 
 def test_discover_then_sync_with_catalog_and_state(api, tmp_path):
     config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps(CONFIG))
+    config_path.write_text(json.dumps({**CONFIG, "start_date": "2024-02-01T00:00:00Z"}))
 
     # Discovery emits every stream with a full schema.
     catalog = json.loads(run(["--config", str(config_path), "--discover"]))
@@ -33,7 +33,7 @@ def test_discover_then_sync_with_catalog_and_state(api, tmp_path):
     assert "Health_Notes__gc" in company_props and "Csm__gr.Email" in company_props
     assert entries["Company"]["key_properties"] == ["Gsid"]
 
-    # Select four streams and drop one custom field from Company.
+    # Select five streams and drop one custom field from Company.
     for tap_stream_id, entry in entries.items():
         for item in entry["metadata"]:
             if not item["breadcrumb"]:
@@ -51,11 +51,12 @@ def test_discover_then_sync_with_catalog_and_state(api, tmp_path):
     rows = [company_row(5), company_row(9)]
     rows[0]["Health_Notes__gc"] = "Renewal looks safe"
     rows[0]["Is_Active__gc"] = True
-    api.mocker.post(query_url("Company"), json=query_page(rows))
-    api.mocker.post(query_url("activity_timeline"), json=query_page([timeline_row(1)], records_shape=True))
-    api.mocker.post(f"{BASE_URL}/v2/cockpit/cta/list", json={**load("cta_list_response.json"), "data": [cta_row(3)]})
-    api.mocker.post(query_url("record_delete_log"), json=load("delete_log_response.json"))
-    api.mocker.post(query_url("record_delete_log_high_volume"), json=load("custom_object_query_empty_response.json"))
+    company = api.serve(query_url("company"), QueryEngine(rows, {"ModifiedDate"}))
+    api.serve(query_url("activity_timeline"), QueryEngine([timeline_row(1)], {"ModifiedDate"}, shape="records"))
+    api.serve(f"{BASE_URL}/v2/cockpit/cta/list", QueryEngine([cta_row(3)], {"ModifiedDate"}, unordered=True))
+    api.serve(f"{BASE_URL}/v2/cockpit/cta/deleted/list", QueryEngine([cta_deleted_row(2)], {"ModifiedDate"}, unordered=True))
+    api.serve(query_url("record_delete_log"), QueryEngine(load("delete_log_response.json")["data"]["records"], {"DeletedOn"}, shape="records"))
+    api.mocker.post(query_url("record_delete_log_high_volume"), status_code=400, json=load("describe_not_found_response.json"))
 
     messages = parse(run([
         "--config", str(config_path),
@@ -83,17 +84,17 @@ def test_discover_then_sync_with_catalog_and_state(api, tmp_path):
     assert company_records[0]["Health_Notes__gc"] == "Renewal looks safe"
     assert "Is_Active__gc" not in company_records[0]
 
-    # The query used the bookmark and selected the custom field.
-    body = [r for r in api.mocker.request_history if r.path == "/v1/data/objects/query/company"][0].json()
-    assert body["where"]["conditions"][0]["value"] == ["2024-02-05 08:24:35"]
+    # The query used the bookmark less 24 hours, and selected the custom field.
+    body = company.bodies[0]
+    assert body["where"]["conditions"][0]["value"] == ["2024-02-04T08:24:35.253+0000"]
     assert "Health_Notes__gc" in body["select"] and "Is_Active__gc" not in body["select"]
 
     # Bookmarks advance.
     bookmarks = messages[-1]["value"]["bookmarks"]
-    assert bookmarks["Company"]["replication_key_value"] > old
-    assert bookmarks["Company"]["replication_key_value"].startswith("2024-02-05T08:24:44")
-    assert bookmarks["timeline"]["replication_key_value"].startswith("2024-02-05T08:24:36")
-    assert bookmarks["cta"]["replication_key_value"] == "2024-02-05T09:03:35.253Z"
+    assert bookmarks["Company"]["replication_key_value"] == "2024-02-05T08:24:44.253000+00:00"
+    assert bookmarks["timeline"]["replication_key_value"] == "2024-02-05T08:24:36.253000+00:00"
+    assert bookmarks["cta"]["replication_key_value"] == "2024-02-05T11:24:35.253Z"
+    assert bookmarks["cta_deleted"]["replication_key_value"] == "2024-02-05T10:24:35.253Z"
     delete_partitions = {
         p["context"]["delete_log"]: p.get("replication_key_value")
         for p in bookmarks["deleted_records"]["partitions"]

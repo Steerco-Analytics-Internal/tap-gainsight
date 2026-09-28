@@ -9,8 +9,11 @@ only the names. Helpers below say which fixture they start from.
 from __future__ import annotations
 
 import copy
+import datetime
 import json
 import pathlib
+import random
+import re
 import time
 import typing as t
 
@@ -130,12 +133,14 @@ def company_person_fields() -> t.List[dict]:
 
 
 def timeline_fields() -> t.List[dict]:
-    """Field names from the Timeline Read API sample request."""
-    fields = [
-        doc_field("Gsid", "activity_timeline"),
-        doc_field("CreatedDate", "activity_timeline"),
-        doc_field("ModifiedDate", "activity_timeline", fieldName="LastModifiedDate"),
-    ]
+    """Documented Timeline field names on the documented describe entries.
+
+    Gsid, CreatedDate and ModifiedDate are the standard system fields from
+    the describe sample. The rest are from the Timeline Read and Insert
+    samples. Whether a live activity_timeline describe has ModifiedDate is
+    unconfirmed.
+    """
+    fields = standard_fields("activity_timeline")
     for name in ("contextname", "GsRelationshipId", "GsCompanyId", "AuthorId", "Subject", "Notes"):
         fields.append(doc_field("Name__gc", "activity_timeline", fieldName=name, label=name))
     fields.append(doc_field("Name__gc", "activity_timeline", fieldName="Ant__CustomNumber__c", dataType="NUMBER"))
@@ -182,8 +187,137 @@ def query_page(rows: t.List[dict], records_shape: bool = False) -> dict:
     return payload
 
 
+EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+_WHERE_VALUE = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})"
+    r"(?:[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?)?"
+    r"(Z|[+-]\d{2}:?\d{2})?$"
+)
+
+
+def to_ms(value: t.Any, naive_offset_hours: float = 0, ignore_offset: bool = False) -> t.Optional[int]:
+    """Parse an epoch-ms number or a date string to epoch milliseconds.
+
+    `naive_offset_hours` is the server's time zone for values with no offset.
+    `ignore_offset` simulates a server that drops an explicit offset.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return int(value)
+    match = _WHERE_VALUE.match(str(value))
+    if not match:
+        raise ValueError(f"Unparseable date value: {value!r}")
+    year, month, day, hour, minute, second, fraction, offset = match.groups()
+    moment = datetime.datetime(
+        int(year), int(month), int(day), int(hour or 0), int(minute or 0), int(second or 0),
+        int((fraction or "0").ljust(6, "0")), tzinfo=datetime.timezone.utc,
+    )
+    if offset and not ignore_offset:
+        if offset != "Z":
+            sign = 1 if offset[0] == "+" else -1
+            digits = offset[1:].replace(":", "")
+            moment -= sign * datetime.timedelta(hours=int(digits[:2]), minutes=int(digits[2:]))
+    else:
+        moment -= datetime.timedelta(hours=naive_offset_hours)
+    return int((moment - EPOCH).total_seconds() * 1000)
+
+
+class QueryEngine:
+    """Evaluates a query body over rows, as the documented query API does.
+
+    It honors `where` (conditions and `expression`), `orderBy`, `limit` and
+    `offset`, or `pageSize` and `pageNumber` for the CTA APIs. Condition
+    keys are `name` for MDA queries and `fieldName` for CTA calls.
+    """
+
+    def __init__(
+        self,
+        rows: t.List[dict],
+        date_fields: t.Iterable[str],
+        shape: str = "list",
+        unordered: bool = False,
+        naive_offset_hours: float = 0,
+        ignore_offset: bool = False,
+    ) -> None:
+        self.rows = rows
+        self.date_fields = set(date_fields)
+        self.shape = shape
+        self.unordered = unordered
+        self.naive_offset_hours = naive_offset_hours
+        self.ignore_offset = ignore_offset
+        self.bodies: t.List[dict] = []
+        self.before_request: t.Optional[t.Callable[[int, "QueryEngine"], None]] = None
+
+    def _value(self, field_name: str, value: t.Any, from_row: bool) -> t.Any:
+        if field_name in self.date_fields:
+            if from_row:
+                return to_ms(value)
+            return to_ms(value, self.naive_offset_hours, self.ignore_offset)
+        return value
+
+    def _test(self, row: dict, condition: dict) -> bool:
+        field_name = condition.get("name") or condition.get("fieldName")
+        operator = condition["operator"]
+        actual = self._value(field_name, row.get(field_name), True)
+        if operator == "IS_NULL":
+            return actual is None
+        if operator == "IS_NOT_NULL":
+            return actual is not None
+        if actual is None:
+            return False
+        expected = [self._value(field_name, v, False) for v in condition["value"]]
+        ops = {
+            "EQ": lambda a, b: a == b[0],
+            "NE": lambda a, b: a != b[0],
+            "GT": lambda a, b: a > b[0],
+            "GTE": lambda a, b: a >= b[0],
+            "LT": lambda a, b: a < b[0],
+            "LTE": lambda a, b: a <= b[0],
+            "BTW": lambda a, b: b[0] <= a <= b[1],
+        }
+        return ops[operator](actual, expected)
+
+    def _matches(self, row: dict, where: t.Optional[dict]) -> bool:
+        if not where:
+            return True
+        results = {c["alias"]: self._test(row, c) for c in where["conditions"]}
+        tokens = re.findall(r"\(|\)|AND|OR|[A-Z]", where["expression"])
+        python = " ".join(
+            {"AND": "and", "OR": "or", "(": "(", ")": ")"}.get(tok, str(results.get(tok)))
+            for tok in tokens
+        )
+        return bool(eval(python, {"__builtins__": {}}))
+
+    def respond(self, body: dict) -> dict:
+        self.bodies.append(body)
+        if self.before_request:
+            self.before_request(len(self.bodies), self)
+        rows = [r for r in self.rows if self._matches(r, body.get("where"))]
+        for key, direction in reversed(list((body.get("orderBy") or {}).items())):
+            present = [r for r in rows if r.get(key) is not None]
+            missing = [r for r in rows if r.get(key) is None]
+            present.sort(key=lambda r: self._value(key, r[key], True), reverse=direction == "desc")
+            rows = present + missing
+        if self.unordered:
+            random.Random(len(self.bodies)).shuffle(rows)
+        if "pageSize" in body:
+            size, number = body["pageSize"], body["pageNumber"]
+            page = rows[(number - 1) * size : number * size]
+        else:
+            page = rows[body.get("offset", 0) : body.get("offset", 0) + body["limit"]]
+        page = [{k: v for k, v in r.items()} for r in page]
+        if self.shape == "records":
+            return {"result": True, "errorCode": None, "errorDesc": None, "data": {"records": page}}
+        return {"result": True, "errorCode": None, "errorDesc": None, "data": page}
+
+
 class FakeGainsight:
-    """Registers the metadata endpoints on a requests-mock Mocker."""
+    """A fake Gainsight tenant on a case-sensitive requests-mock Mocker.
+
+    Metadata endpoints are registered up front. Object names must match the
+    object list exactly, so a case mismatch fails the test.
+    """
 
     def __init__(self, mocker: requests_mock_lib.Mocker) -> None:
         self.mocker = mocker
@@ -211,13 +345,11 @@ class FakeGainsight:
     def _describe(self, request: t.Any, context: t.Any) -> dict:
         names = request.json()["objectNames"]
         for name in names:
-            if name.lower() in self.failing:
-                status, body = self.failing[name.lower()]
+            if name in self.failing:
+                status, body = self.failing[name]
                 context.status_code = status
                 return body
-        entries = [
-            self.describes[n.lower()] for n in names if n.lower() in self.describes
-        ]
+        entries = [self.describes[n] for n in names if n in self.describes]
         if not entries:
             context.status_code = 400
             return load("describe_not_found_response.json")
@@ -233,12 +365,28 @@ class FakeGainsight:
             if r.path.endswith("/v1/meta/services/objects/describe")
         ]
 
+    def serve(self, url: str, engine: QueryEngine) -> QueryEngine:
+        """Answer POSTs to `url` from `engine`."""
+        self.mocker.post(url, json=lambda request, context: engine.respond(request.json()))
+        return engine
+
 
 @pytest.fixture
 def sleeps(monkeypatch: pytest.MonkeyPatch) -> t.List[float]:
-    """Record sleeps instead of sleeping. Covers backoff and the limiter."""
+    """Record sleeps instead of sleeping. Covers backoff and the limiter.
+
+    A fake monotonic clock advances by each sleep, so the rate limiter
+    sees time pass in tests that make more than 100 calls.
+    """
     recorded: t.List[float] = []
-    monkeypatch.setattr(time, "sleep", lambda seconds: recorded.append(seconds))
+    clock = [time.monotonic()]
+
+    def fake_sleep(seconds: float) -> None:
+        recorded.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(time, "sleep", fake_sleep)
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
     return recorded
 
 
@@ -249,7 +397,7 @@ def _no_real_sleep(sleeps: t.List[float]) -> None:
 
 @pytest.fixture
 def api() -> t.Iterator[FakeGainsight]:
-    with requests_mock_lib.Mocker() as mocker:
+    with requests_mock_lib.Mocker(case_sensitive=True) as mocker:
         yield FakeGainsight(mocker)
 
 
@@ -271,4 +419,4 @@ def query_url(object_name: str) -> str:
 
 
 def requests_to(mocker: requests_mock_lib.Mocker, path: str) -> t.List[t.Any]:
-    return [r for r in mocker.request_history if r.path == path.lower()]
+    return [r for r in mocker.request_history if r.path == path]

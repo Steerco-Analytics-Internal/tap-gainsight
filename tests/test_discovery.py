@@ -27,7 +27,7 @@ def test_discovery_emits_a_stream_per_listed_object(api):
     assert {"Company", "Company_Person", "GsUser", "obj1__gc"} <= set(streams)
     # Dedicated objects never get a generic stream.
     assert "activity_timeline" not in streams and "cs_cta" not in streams
-    assert {"timeline", "cta", "deleted_records"} <= set(streams)
+    assert {"timeline", "cta", "cta_deleted", "deleted_records"} <= set(streams)
     # Listed objects that fail describe are dropped, not fatal.
     assert "email_logs" not in streams and "autoindex10__gc" not in streams
 
@@ -36,7 +36,7 @@ def test_discovery_batches_describe_calls(api):
     make_tap().discover_streams()
     first = api.describe_calls()[0]
     assert len(first) > 1
-    assert first[0] == "Company"
+    assert first[0] == "company"
 
 
 def test_company_schema_has_every_field_custom_lookup_and_label(api):
@@ -94,7 +94,7 @@ def test_timeline_schema_comes_from_describe(api):
     props = timeline.schema["properties"]
     assert timeline.object_name == "activity_timeline"
     assert timeline.path == "/v1/data/objects/query/activity_timeline"
-    assert timeline.replication_key == "LastModifiedDate"
+    assert timeline.replication_key == "ModifiedDate"
     for name in ("Gsid", "contextname", "GsCompanyId", "GsRelationshipId", "AuthorId", "Subject", "Notes", "ActivityDate", "Ant__CustomNumber__c"):
         assert name in props
 
@@ -144,19 +144,19 @@ def test_bad_optional_object_is_dropped_and_the_batch_retried(api, caplog):
 
 def test_company_describe_failure_raises(api):
     api.failing["company"] = (400, load("describe_not_found_response.json"))
-    with pytest.raises(GainsightAPIError, match="required object Company"):
+    with pytest.raises(GainsightAPIError, match="required object company"):
         make_tap()
 
 
 def test_company_missing_from_describe_raises(api):
     del api.describes["company"]
-    with pytest.raises(GainsightAPIError, match="required object Company"):
+    with pytest.raises(GainsightAPIError, match="required object company"):
         make_tap()
 
 
 def test_company_with_no_fields_raises(api):
     api.describes["company"] = describe_entry("company", [])
-    with pytest.raises(GainsightAPIError, match="required object Company"):
+    with pytest.raises(GainsightAPIError, match="required object company"):
         make_tap()
 
 

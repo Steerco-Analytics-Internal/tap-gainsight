@@ -1,13 +1,22 @@
 """Contract tests: each request matches the documented request shape.
 
-The documented shapes come from the verbatim request fixtures.
+The documented shapes come from the verbatim request fixtures. Where the
+tap goes beyond a sample, such as the keyset expression, the test says so.
 """
 
 import re
 
 import pytest
 
-from tests.conftest import ACCESS_KEY, load, make_tap, query_page, query_url
+from tests.conftest import (
+    ACCESS_KEY,
+    BASE_URL,
+    QueryEngine,
+    load,
+    make_tap,
+    query_url,
+)
+from tests.test_streams import company_row, cta_row, deleted_row, timeline_row
 
 # Docs, Custom Object API, "enum operators ... supported in Read API".
 DOCUMENTED_OPERATORS = {
@@ -15,8 +24,13 @@ DOCUMENTED_OPERATORS = {
     "CONTAINS", "DOES_NOT_CONTAINS", "STARTS_WITH", "ENDS_WITH",
     "INCLUDES", "IN", "EXCLUDES", "NOT_IN",
 }
+# Timeline APIs, Data Type table: DateTime "yyyy-MM-dd'T'HH:mm:ss.SSSZ".
+API_DATETIME = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}\+0000$")
+# Retrieve Deleted Data API sample: "2024-02-05 00:00:00".
 QUERY_DATETIME = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
-CTA_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# Documented expressions are aliases joined by AND or OR. Parentheses are
+# the tap's addition for the keyset page, and are unconfirmed.
+EXPRESSION = re.compile(r"^[A-Z](?: (?:AND|OR) \(?[A-Z](?: (?:AND|OR) [A-Z])*\)?)*$")
 
 
 def documented_query_keys():
@@ -31,15 +45,14 @@ def documented_query_keys():
     return keys
 
 
-def documented_condition_keys(fixture, key="where"):
-    conditions = load(fixture)[key]["conditions"]
-    return [set(c) for c in conditions]
+def documented_condition_key_sets(fixture):
+    return [set(c) for c in load(fixture)["where"]["conditions"]]
 
 
-def only_request(api, path):
-    requests = [r for r in api.mocker.request_history if r.path == path.lower()]
-    assert requests, f"no request to {path}"
-    return requests[0]
+def requests_to(api, path):
+    found = [r for r in api.mocker.request_history if r.path == path]
+    assert found, f"no request to {path}"
+    return found
 
 
 def assert_documented_headers(request):
@@ -48,115 +61,168 @@ def assert_documented_headers(request):
     assert request.headers["Content-Type"] == "application/json"
 
 
-def assert_query_condition(condition, documented_keys):
-    assert set(condition) in documented_keys
-    assert condition["operator"] in DOCUMENTED_OPERATORS
-    assert isinstance(condition["value"], list)
+def assert_where(where, key_sets, date_format):
+    assert EXPRESSION.match(where["expression"])
+    for condition in where["conditions"]:
+        assert set(condition) in key_sets
+        assert condition["operator"] in DOCUMENTED_OPERATORS
+        assert isinstance(condition["value"], list)
+        if condition["operator"] in {"IS_NULL", "IS_NOT_NULL"}:
+            assert condition["value"] == []
+    for condition in where["conditions"]:
+        if condition["operator"] in {"GT", "GTE", "LT", "EQ"} and condition.get("name", condition.get("fieldName")) in {"ModifiedDate", "DeletedOn"}:
+            assert date_format.match(condition["value"][0])
 
 
 @pytest.mark.parametrize(
-    "stream_name, object_name, request_fixture",
+    "stream_name, object_name, request_fixture, make_row, shape",
     [
-        ("Company", "Company", "company_query_request.json"),
-        ("Company_Person", "Company_Person", "custom_object_query_request.json"),
-        ("timeline", "activity_timeline", "timeline_query_request.json"),
+        ("Company", "company", "company_query_request.json", company_row, "list"),
+        ("timeline", "activity_timeline", "timeline_query_request.json", timeline_row, "records"),
     ],
 )
-def test_mda_query_matches_the_documented_shape(api, stream_name, object_name, request_fixture):
-    api.mocker.post(query_url(object_name), json=query_page([]))
+def test_mda_queries_match_the_documented_shape(api, stream_name, object_name, request_fixture, make_row, shape):
+    rows = [make_row(i) for i in range(3)]
+    engine = api.serve(query_url(object_name), QueryEngine(rows, {"ModifiedDate"}, shape=shape))
+
+    def move_second_row(request_number, engine):
+        if request_number == 2:
+            rows[1]["ModifiedDate"] += 99_000
+
+    engine.before_request = move_second_row
     tap = make_tap(start_date="2024-02-05T08:34:35Z")
     stream = tap.streams[stream_name]
+    stream.page_size = 2
     stream.sync()
 
-    request = only_request(api, f"/v1/data/objects/query/{object_name}")
-    assert_documented_headers(request)
-    body = request.json()
+    requests = requests_to(api, f"/v1/data/objects/query/{object_name}")
     documented = load(request_fixture)
-    assert set(body) <= documented_query_keys()
-    assert set(body) == set(documented)
-    assert body["select"] == stream.select_paths()
-    assert set(body["select"]) >= set(stream.plan.fields)
-    assert body["limit"] == 5000 and body["offset"] == 0
-    assert body["where"]["expression"] == "A"
-    (condition,) = body["where"]["conditions"]
-    assert_query_condition(condition, documented_condition_keys(request_fixture))
-    assert condition == {
-        "name": stream.replication_key,
-        "alias": "A",
-        "value": ["2024-02-05 08:34:35"],
-        "operator": "GTE",
+    key_sets = documented_condition_key_sets(request_fixture)
+    for request in requests:
+        assert_documented_headers(request)
+        body = request.json()
+        assert set(body) <= documented_query_keys()
+        assert_where(body["where"], key_sets, API_DATETIME)
+        assert body["offset"] >= 0
+
+    first, keyset, probe = (r.json() for r in requests[:3])
+    # First page: the documented body keys, filtered from the start less 24 hours.
+    assert set(first) == set(documented)
+    assert first["select"] == stream.select_paths()
+    assert set(first["select"]) >= set(stream.plan.fields)
+    assert (first["limit"], first["offset"]) == (2, 0)
+    assert first["where"] == {
+        "conditions": [{"name": "ModifiedDate", "alias": "A", "value": ["2024-02-04T08:34:35.000+0000"], "operator": "GTE"}],
+        "expression": "A",
     }
-    assert QUERY_DATETIME.match(condition["value"][0])
-    assert list(body["orderBy"].values()) == ["asc"] * len(body["orderBy"])
-    assert list(body["orderBy"])[0] == stream.replication_key
+    assert first["orderBy"] == {"ModifiedDate": "asc", "Gsid": "asc"}
+    # Keyset page.
+    assert keyset["where"]["expression"] == "A OR (B AND C)"
+    assert [(c["name"], c["operator"]) for c in keyset["where"]["conditions"]] == [
+        ("ModifiedDate", "GT"), ("ModifiedDate", "EQ"), ("Gsid", "GTE"),
+    ]
+    # The anchor moved, so the tap reads it by Gsid.
+    assert probe["select"] == ["Gsid", "ModifiedDate"]
+    assert probe["where"]["conditions"][0]["operator"] == "EQ"
+    assert probe["limit"] == 1
+    # Null pass last.
+    last = requests[-1].json()
+    assert last["where"]["conditions"][0]["operator"] == "IS_NULL"
+    assert last["orderBy"] == {"Gsid": "asc"}
 
 
-def test_full_table_query_has_no_where(api):
-    api.mocker.post(query_url("Company"), json=query_page([]))
-    make_tap().streams["Company"].sync()
-    body = only_request(api, "/v1/data/objects/query/Company").json()
-    assert "where" not in body
-    assert body["orderBy"] == {"ModifiedDate": "asc", "Gsid": "asc"}
+def test_full_table_object_pages_by_offset_sorted_by_gsid(api):
+    from tests.conftest import describe_entry, doc_field
+
+    api.describes["obj1__gc"] = describe_entry("obj1__gc", [doc_field("Gsid", "obj1__gc")])
+    engine = api.serve(query_url("obj1__gc"), QueryEngine([{"Gsid": f"G{i}"} for i in range(3)], set()))
+    stream = make_tap().streams["obj1__gc"]
+    stream.page_size = 2
+    assert len(list(stream.get_records(None))) == 3
+    assert [(b.get("where"), b["orderBy"], b["offset"]) for b in engine.bodies] == [
+        (None, {"Gsid": "asc"}, 0),
+        (None, {"Gsid": "asc"}, 2),
+    ]
 
 
 def test_company_select_includes_lookup_paths(api):
-    api.mocker.post(query_url("Company"), json=query_page([]))
-    make_tap().streams["Company"].sync()
-    select = only_request(api, "/v1/data/objects/query/Company").json()["select"]
+    engine = api.serve(query_url("company"), QueryEngine([], {"ModifiedDate"}))
+    list(make_tap().streams["Company"].get_records(None))
+    select = engine.bodies[0]["select"]
     assert {"Csm__gr.Name", "Csm__gr.Email", "CreatedBy__gr.Name", "Health_Notes__gc"} <= set(select)
     assert not any(name.endswith("_label") for name in select)
 
 
-def test_cta_request_matches_the_documented_shape(api):
-    api.mocker.post("https://acme.gainsightcloud.com/v2/cockpit/cta/list", json={"result": True, "data": []})
-    tap = make_tap(start_date="2024-02-05T08:34:35Z")
-    tap.streams["cta"].sync()
-
-    request = only_request(api, "/v2/cockpit/cta/list")
-    assert_documented_headers(request)
-    body = request.json()
-    documented = load("cta_list_request.json")
-    assert set(body) <= set(documented)
-    assert set(body) == {"select", "where", "pageSize", "pageNumber"}
-    assert body["pageSize"] == 1000 and body["pageNumber"] == 1
-    assert body["select"][:5] == ["name", "Comments", "CompanyId", "CreatedDate", "ModifiedDate"]
-    (condition,) = body["where"]["conditions"]
-    # Docs, Fetch CTA sample: {"fieldName", "value", "alias", "operator"}.
-    assert set(condition) in documented_condition_keys("cta_list_request.json")
-    assert condition == {
-        "fieldName": "ModifiedDate",
-        "value": ["2024-02-04"],
-        "alias": "A",
-        "operator": "GTE",
+@pytest.mark.parametrize(
+    "stream_name, path, documented_select",
+    [
+        ("cta", "/v2/cockpit/cta/list", None),
+        ("cta_deleted", "/v2/cockpit/cta/deleted/list", load("cta_deleted_list_request.json")["select"]),
+    ],
+)
+def test_cta_requests_match_the_documented_shape(api, stream_name, path, documented_select):
+    engine = api.serve(f"{BASE_URL}{path}", QueryEngine([cta_row(1)], {"ModifiedDate"}, unordered=True))
+    make_tap(start_date="2024-02-05T08:34:35Z").streams[stream_name].sync()
+    # Fetch CTA sample condition: {"fieldName", "value", "alias", "operator"}.
+    key_sets = documented_condition_key_sets("cta_list_request.json")
+    documented_keys = set(load("cta_list_request.json")) | set(load("cta_deleted_list_request.json"))
+    for request in requests_to(api, path):
+        assert_documented_headers(request)
+        body = request.json()
+        assert set(body) <= documented_keys
+        assert set(body) == {"select", "where", "pageSize", "pageNumber"}
+        assert body["pageSize"] == 1000 and body["pageNumber"] == 1
+        assert_where(body["where"], key_sets, API_DATETIME)
+        if documented_select is not None:
+            assert body["select"] == documented_select
+    first = engine.bodies[0]
+    assert first["where"] == {
+        "conditions": [
+            {"fieldName": "ModifiedDate", "value": ["2024-02-04T08:34:35.000+0000"], "alias": "A", "operator": "GTE"},
+            {"fieldName": "ModifiedDate", "value": ["2024-02-05T08:34:35.000+0000"], "alias": "B", "operator": "LT"},
+        ],
+        "expression": "A AND B",
     }
-    assert CTA_DATE.match(condition["value"][0])
-    assert body["where"]["expression"] == "A"
 
 
-def test_cta_modified_date_filter_is_documented():
-    """The Retrieve Deleted Data page selects and filters CTAs on ModifiedDate."""
-    documented = load("cta_deleted_list_request.json")
-    assert "ModifiedDate" in documented["select"]
-    assert documented["where"]["conditions"][0]["fieldName"] == "ModifiedDate"
+def test_cta_select_starts_with_the_documented_fields(api):
+    engine = api.serve(f"{BASE_URL}/v2/cockpit/cta/list", QueryEngine([], {"ModifiedDate"}))
+    make_tap(start_date="2026-09-01T00:00:00Z").streams["cta"].sync()
+    select = engine.bodies[0]["select"]
+    assert select[:6] == ["name", "Comments", "CompanyId", "CompanyId__gr.Name", "CreatedDate", "ModifiedDate"]
+    # The Fetch CTA sample selects "name" and "CompanyId__gr.Name".
+    assert {"name", "CompanyId__gr.Name"} <= set(load("cta_list_request.json")["select"])
 
 
-def test_delete_log_request_matches_the_documented_shape(api):
+def test_cta_modified_date_filter_uses_the_documented_condition_keys(api):
+    """The deleted-CTA sample filters ModifiedDate with fieldName conditions."""
+    engine = api.serve(f"{BASE_URL}/v2/cockpit/cta/deleted/list", QueryEngine([], {"ModifiedDate"}))
+    make_tap(start_date="2026-09-01T00:00:00Z").streams["cta_deleted"].sync()
+    documented = load("cta_deleted_list_request.json")["where"]["conditions"][0]
+    sent = engine.bodies[0]["where"]["conditions"][0]
+    assert sent["fieldName"] == documented["fieldName"] == "ModifiedDate"
+    assert set(sent) - {"value"} == set(documented) - {"literal"}
+
+
+def test_delete_log_requests_match_the_documented_shape(api):
     for log in ("record_delete_log", "record_delete_log_high_volume"):
-        api.mocker.post(query_url(log), json=load("custom_object_query_empty_response.json"))
-    tap = make_tap(start_date="2024-02-05T00:00:00Z")
-    stream = tap.streams["deleted_records"]
+        rows = [deleted_row(i) for i in range(3)] if log == "record_delete_log" else []
+        api.serve(query_url(log), QueryEngine(rows, {"DeletedOn"}, shape="records"))
+    stream = make_tap(start_date="2024-02-06T00:00:00Z").streams["deleted_records"]
+    stream.page_size = 2
     stream.sync()
 
     documented = load("delete_log_request.json")
+    key_sets = documented_condition_key_sets("delete_log_request.json")
     for log in ("record_delete_log", "record_delete_log_high_volume"):
-        request = only_request(api, f"/v1/data/objects/query/{log}")
-        assert_documented_headers(request)
-        body = request.json()
-        assert set(body) <= documented_query_keys()
-        assert body["select"] == documented["select"]
-        (condition,) = body["where"]["conditions"]
-        assert set(condition) == set(documented["where"]["conditions"][0])
-        assert condition["name"] == "DeletedOn"
-        assert condition["value"] == documented["where"]["conditions"][0]["value"]
-        assert condition["operator"] in DOCUMENTED_OPERATORS
-        assert body["limit"] == 5000 and body["offset"] == 0
+        requests = requests_to(api, f"/v1/data/objects/query/{log}")
+        for request in requests:
+            assert_documented_headers(request)
+            body = request.json()
+            assert set(body) <= documented_query_keys()
+            assert body["select"] == documented["select"]
+            assert_where(body["where"], key_sets, QUERY_DATETIME)
+        first = requests[0].json()
+        (condition,) = first["where"]["conditions"]
+        assert condition == {"name": "DeletedOn", "alias": "A", "value": ["2024-02-05 00:00:00"], "operator": "GTE"}
+        assert first["orderBy"] == {"DeletedOn": "asc", "RecordId": "asc"}

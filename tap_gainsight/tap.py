@@ -14,6 +14,7 @@ from tap_gainsight.client import (
     RateLimiter,
 )
 from tap_gainsight.streams import (
+    CtaDeletedStream,
     CtaStream,
     DeletedRecordsStream,
     MDAObjectStream,
@@ -22,9 +23,9 @@ from tap_gainsight.streams import (
     picklist_items,
 )
 
-# Objects are keyed by lowercase name. The object list returns lowercase
-# names, such as "company". These standard objects keep the names the API
-# pages use in their endpoint paths, for stable stream names.
+# Objects are keyed by lowercase name. Calls use the name exactly as the
+# object list returns it, such as "company". These standard objects keep
+# the names the API pages use as their stream names.
 CANONICAL_NAMES = {
     "company": "Company",
     "company_person": "Company_Person",
@@ -186,28 +187,35 @@ class TapGainsight(Tap):
         allowlist = [str(name) for name in self.config.get("objects") or []]
         allow = {name.lower() for name in allowlist}
 
-        # Lowercase key -> API name used in query paths and stream names.
-        stream_objects: t.Dict[str, str] = {REQUIRED_OBJECT: "Company"}
-        listed_names = {}
+        # Lowercase key -> object name exactly as the object list returns it.
+        # Describe and query calls use that name. Stream names use
+        # CANONICAL_NAMES for the documented standard objects.
+        listed_names: t.Dict[str, str] = {}
         for item in listed:
             name = str(item.get("objectName") or "")
-            if not name or item.get("readable") is False:
-                continue
-            listed_names[name.lower()] = name
-            key = name.lower()
+            if name and item.get("readable") is not False:
+                listed_names[name.lower()] = name
+
+        def api_name(key: str, fallback: str) -> str:
+            return listed_names.get(key, fallback)
+
+        stream_objects: t.Dict[str, str] = {
+            REQUIRED_OBJECT: api_name(REQUIRED_OBJECT, "Company")
+        }
+        for key, name in listed_names.items():
             if key in DEDICATED_OBJECTS or (allow and key not in allow):
                 continue
-            stream_objects.setdefault(key, CANONICAL_NAMES.get(key, name))
+            stream_objects.setdefault(key, name)
         for name in allowlist:
             key = name.lower()
             if key not in DEDICATED_OBJECTS:
-                stream_objects.setdefault(key, CANONICAL_NAMES.get(key, name))
+                stream_objects.setdefault(key, api_name(key, name))
 
         # GsUser and Company are described for lookup columns even when the
         # allowlist leaves out their streams.
         to_describe: t.Dict[str, str] = dict(stream_objects)
-        to_describe.setdefault("gsuser", "GsUser")
-        to_describe.setdefault(TIMELINE_OBJECT, TIMELINE_OBJECT)
+        to_describe.setdefault("gsuser", api_name("gsuser", "GsUser"))
+        to_describe.setdefault(TIMELINE_OBJECT, api_name(TIMELINE_OBJECT, TIMELINE_OBJECT))
         if CTA_OBJECT in listed_names:
             to_describe.setdefault(CTA_OBJECT, listed_names[CTA_OBJECT])
 
@@ -231,27 +239,34 @@ class TapGainsight(Tap):
             )
 
         streams: t.List[Stream] = []
-        for key, api_name in stream_objects.items():
+        for key, name in stream_objects.items():
             if key not in described:
                 continue
             plan = plan_for(key)
             if not plan.fields:
                 self._drop_or_raise(
-                    api_name,
+                    name,
                     GainsightAPIError("Describe returned no fields."),
                     {REQUIRED_OBJECT},
                 )
                 continue
-            streams.append(MDAObjectStream(self, api_name, plan))
+            streams.append(
+                MDAObjectStream(
+                    self, name, plan, name=CANONICAL_NAMES.get(key, name)
+                )
+            )
 
         if TIMELINE_OBJECT in described and plan_for(TIMELINE_OBJECT).fields:
             streams.append(
                 MDAObjectStream(
                     self,
-                    TIMELINE_OBJECT,
+                    to_describe[TIMELINE_OBJECT],
                     plan_for(TIMELINE_OBJECT),
                     name="timeline",
-                    replication_key_candidates=("ModifiedDate", "LastModifiedDate"),
+                    # The Timeline docs name no modified-date field. The tap
+                    # uses ModifiedDate, the standard describe field, only if
+                    # the live describe has it. Otherwise timeline is full table.
+                    replication_key_candidates=("ModifiedDate",),
                 )
             )
 
@@ -262,8 +277,51 @@ class TapGainsight(Tap):
             and str(field.get("fieldName", "")).endswith("__gc")
         ]
         streams.append(CtaStream(self, custom_fields=cta_custom))
+        streams.append(CtaDeletedStream(self))
         streams.append(DeletedRecordsStream(self))
+        self._check_input_catalog(streams)
         return streams
+
+    def _check_input_catalog(self, streams: t.List[Stream]) -> None:
+        """Raise when the input catalog selects what discovery cannot produce.
+
+        Discovery runs again at sync time. A stream or column can drop out
+        between runs, for example when a describe or dropdown call fails. The
+        SDK would then skip it without a word, so this check fails the run
+        and names what is missing.
+        """
+        catalog = self.input_catalog
+        if not catalog:
+            return
+        produced = {stream.name: stream for stream in streams}
+        missing_streams: t.List[str] = []
+        missing_columns: t.List[str] = []
+        for stream_id, entry in catalog.items():
+            selection = entry.metadata.resolve_selection()
+            if not selection.get((), False):
+                continue
+            stream = produced.get(stream_id)
+            if stream is None:
+                missing_streams.append(stream_id)
+                continue
+            schema = entry.schema.to_dict() if entry.schema else {}
+            available = stream.schema.get("properties", {})
+            for column in schema.get("properties", {}):
+                if selection.get(("properties", column), False) and column not in available:
+                    missing_columns.append(f"{stream_id}.{column}")
+        if missing_streams or missing_columns:
+            parts = []
+            if missing_streams:
+                parts.append(f"streams {', '.join(sorted(missing_streams))}")
+            if missing_columns:
+                parts.append(f"columns {', '.join(sorted(missing_columns))}")
+            raise GainsightAPIError(
+                "The catalog selects "
+                + " and ".join(parts)
+                + ", but discovery could not produce them. Check the warnings "
+                "above for failed describe or dropdown calls, or run discovery "
+                "again and update the catalog."
+            )
 
 
 if __name__ == "__main__":

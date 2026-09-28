@@ -9,6 +9,7 @@ from tap_gainsight import tap as tap_module
 from tap_gainsight.client import GainsightAuthError
 from tap_gainsight.streams import CtaStream, ObjectPlan, lookup_columns
 from tests.conftest import (
+    QueryEngine,
     describe_entry,
     doc_field,
     load,
@@ -21,7 +22,7 @@ from tests.conftest import (
 
 
 def test_long_error_bodies_are_cut_to_an_excerpt(api):
-    api.mocker.post(query_url("Company"), status_code=400, text="x" * 2000)
+    api.mocker.post(query_url("company"), status_code=400, text="x" * 2000)
     with pytest.raises(FatalAPIError) as info:
         list(make_tap().streams["Company"].get_records(None))
     assert "x" * client.BODY_EXCERPT_LENGTH + "..." in str(info.value)
@@ -29,7 +30,7 @@ def test_long_error_bodies_are_cut_to_an_excerpt(api):
 
 
 def test_user_agent_setting_is_sent(api):
-    api.mocker.post(query_url("Company"), json=query_page([]))
+    api.mocker.post(query_url("company"), json=query_page([]))
     list(make_tap(user_agent="steerco-hotglue/1").streams["Company"].get_records(None))
     request = [r for r in api.mocker.request_history if r.path == "/v1/data/objects/query/company"][0]
     assert request.headers["User-Agent"] == "steerco-hotglue/1"
@@ -106,8 +107,64 @@ def test_auth_failure_during_one_by_one_retry_raises(api):
 
 
 def test_connection_errors_in_streams_are_retried(api):
+    engine = QueryEngine([{"Gsid": "1", "ModifiedDate": 1}], {"ModifiedDate"})
     api.mocker.post(
-        query_url("Company"),
-        [{"exc": requests.exceptions.ConnectionError("reset")}, {"json": query_page([{"Gsid": "1"}])}],
+        query_url("company"),
+        [
+            {"exc": requests.exceptions.ConnectionError("reset")},
+            {"json": lambda request, context: engine.respond(request.json())},
+        ],
     )
     assert len(list(make_tap().streams["Company"].get_records(None))) == 1
+
+
+def test_parse_api_datetime_edges():
+    from tap_gainsight.client import parse_api_datetime, to_epoch_ms
+
+    assert parse_api_datetime(None) is None
+    assert to_epoch_ms(None) is None
+    assert to_epoch_ms("2024-02-05T08:34:35.253+05:30") == to_epoch_ms("2024-02-05T03:04:35.253Z")
+    assert to_epoch_ms("2024-02-05") == to_epoch_ms("2024-02-05 00:00:00")
+    with pytest.raises(ValueError, match="Unrecognized date value"):
+        parse_api_datetime("next Tuesday")
+
+
+def test_base_hooks_must_be_overridden(api):
+    from tap_gainsight.client import GainsightStream, KeysetStream
+    from tap_gainsight.streams import CtaSlicedStream
+
+    tap = make_tap()
+    stream = tap.streams["Company"]
+    with pytest.raises(NotImplementedError):
+        list(GainsightStream.fetch_rows(stream, None))
+    with pytest.raises(NotImplementedError):
+        KeysetStream.base_payload(stream)
+    assert KeysetStream.can_sort_by_tiebreaker(stream) is True
+    with pytest.raises(NotImplementedError):
+        CtaSlicedStream.select_list(tap.streams["cta"])
+
+
+def test_full_table_streams_have_no_filter_start(api):
+    api.describes["obj1__gc"] = describe_entry("obj1__gc", [doc_field("Gsid", "obj1__gc")])
+    assert make_tap(start_date="2024-01-01T00:00:00Z").streams["obj1__gc"].filter_start(None) is None
+
+
+def test_paging_keys_are_selected_even_if_the_catalog_says_no(api, monkeypatch):
+    stream = make_tap().streams["Company"]
+    monkeypatch.setattr(type(stream), "is_property_selected", lambda self, name: name == "Name")
+    assert stream.select_paths() == ["Name", "Gsid", "ModifiedDate"]
+    cta = make_tap().streams["cta"]
+    monkeypatch.setattr(type(cta), "is_property_selected", lambda self, name: name == "Name")
+    assert cta.select_list() == ["name", "ModifiedDate"]
+
+
+def test_cta_null_pass_pages_until_short(api):
+    rows = [{"Gsid": f"1S01NULL{i}", "ModifiedDate": None} for i in range(3)]
+    engine = QueryEngine(rows, {"ModifiedDate"})
+    api.serve("https://acme.gainsightcloud.com/v2/cockpit/cta/list", engine)
+    stream = make_tap().streams["cta"]
+    stream.page_size = 2
+    got = [r["Gsid"] for r in stream.get_records(None)]
+    assert sorted(got) == sorted(r["Gsid"] for r in rows)
+    null_pages = [b["pageNumber"] for b in engine.bodies if b["where"]["conditions"][0]["operator"] == "IS_NULL"]
+    assert null_pages == [1, 2]
