@@ -14,6 +14,7 @@ from tap_gainsight.client import (
     GainsightAuth,
     GainsightAuthError,
     GainsightMetadataClient,
+    GainsightTokenError,
     DEFAULT_REQUESTS_PER_MINUTE,
     RATE_LIMIT_CALLS,
     RECORD_LIMITS_SETTING,
@@ -269,8 +270,8 @@ class TapGainsight(Tap):
         """Describe objects in batches. Drop a failing optional object.
 
         A failed batch is retried one object at a time, so one bad object
-        does not drop the others. Auth errors, and any failure on a required
-        object, raise.
+        does not drop the others. Auth errors, token request errors, and any
+        failure on a required object, raise.
         """
         described: t.Dict[str, dict] = {}
         dropped: t.Set[str] = set()
@@ -279,7 +280,7 @@ class TapGainsight(Tap):
             try:
                 described.update(client.describe(batch))
                 continue
-            except GainsightAuthError:
+            except (GainsightAuthError, GainsightTokenError):
                 raise
             except GainsightAPIError as exc:
                 if len(batch) == 1:
@@ -295,7 +296,7 @@ class TapGainsight(Tap):
             for name in batch:
                 try:
                     described.update(client.describe([name]))
-                except GainsightAuthError:
+                except (GainsightAuthError, GainsightTokenError):
                     raise
                 except GainsightAPIError as exc:
                     self._drop_or_raise(name, exc, required)
@@ -335,7 +336,7 @@ class TapGainsight(Tap):
                     continue
                 try:
                     dropdowns[category] = client.dropdown_items(category)
-                except GainsightAuthError:
+                except (GainsightAuthError, GainsightTokenError):
                     raise
                 except GainsightAPIError as exc:
                     self.logger.warning(

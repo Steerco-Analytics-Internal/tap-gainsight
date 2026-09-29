@@ -142,7 +142,9 @@ Example `config.json`:
 ### Authentication
 
 Set exactly one method. Any other combination fails config validation
-before any request.
+before any request. Each credential must be non-empty, with no leading or
+trailing whitespace and no control characters, such as a tab or newline.
+The error names the setting and never shows its value.
 
 - **Access key:** `access_key`. Gainsight makes a connector IP allowlist
   mandatory for this method. Hotglue jobs call from changing IP addresses,
@@ -171,12 +173,19 @@ With M2M OAuth, the tap works like this:
 1. It sends the `access_token` from the reply as `Authorization: Bearer`
    on every API call.
 1. It keeps the token in memory for the run, never on disk, in logs or in
-   state. It fetches a new token when the current one is within 5 minutes of
-   its `expires_in`.
-1. On a 401 from an API call, it fetches a new token and retries that call
-   once. A second 401 fails the call.
-1. A token request that fails with 400, 401 or 403 fails the run with an
-   error that says the OAuth API Key or Secret was not accepted.
+   state. It fetches a new token when the current one is within 5 minutes,
+   or half its lifetime if that is shorter, of its `expires_in`. An
+   `expires_in` that is not a finite positive number fails the run.
+1. An auth failure on an API call is HTTP 401, or error code
+   `GS_APIG_2401` or `GSOBJ_1024` at any status. After one, the tap fetches
+   a new token and retries the call once, but only when the failed token is
+   still the current one and is more than 10 seconds old. Otherwise the call
+   fails at once. One call or one page never gets more than one new token,
+   across all of its retries.
+1. Any failure of the token request fails the run, discovery included.
+   Discovery never treats it as a failure of one object. A 400 says
+   Gainsight refused the token request. A 401 or 403 says the OAuth API Key
+   or Secret was not accepted. Neither shows the key or secret.
 
 ## Streams
 
@@ -271,8 +280,9 @@ first fetches a token. It then makes these calls:
 Failures:
 
 - An auth failure (HTTP 401 or 403, or error code `GS_APIG_2401` or
-  `GSOBJ_1024`) raises at once. So does any redirect. With M2M OAuth, a 401
-  first gets one new token and one retry.
+  `GSOBJ_1024`) raises at once. So does any redirect. With M2M OAuth, an
+  auth failure on a token older than 10 seconds first gets one new token
+  and one retry. A failed token request always raises.
 - Error code `GS_APIG_2402` means the connection allows only listed IP
   addresses. It raises at once with its own message, which suggests M2M
   OAuth.
