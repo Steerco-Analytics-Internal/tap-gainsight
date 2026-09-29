@@ -5,12 +5,14 @@ its limit before it sends another request, the run must exit cleanly, and no
 bookmark may move.
 """
 
+import datetime
 import json
 
 import pytest
 from click.testing import CliRunner
 from singer_sdk.exceptions import ConfigValidationError
 
+from tap_gainsight import streams as streams_module
 from tap_gainsight.client import RECORD_LIMITS_SETTING, SecondChainStream
 from tap_gainsight.tap import TapGainsight
 from tests.conftest import BASE_URL, CONFIG, QueryEngine, load, make_tap, query_url, requests_to
@@ -67,10 +69,10 @@ def serve_every_stream(api, company_rows=12):
     return company, high_volume
 
 
-def sample_run(tmp_path, limits, state=None):
+def sample_run(tmp_path, limits, state=None, **settings):
     catalog_path = discover_catalog(tmp_path)
     config_path = tmp_path / "sample-config.json"
-    config_path.write_text(json.dumps({**CONFIG, RECORD_LIMITS_SETTING: limits}))
+    config_path.write_text(json.dumps({**CONFIG, **settings, RECORD_LIMITS_SETTING: limits}))
     args = ["--config", str(config_path), "--catalog", str(catalog_path)]
     if state is not None:
         state_path = tmp_path / "state.json"
@@ -167,3 +169,53 @@ def test_discovery_refuses_a_bad_setting(api, tmp_path, value):
     assert result.exit_code != 0
     assert isinstance(result.exception, ConfigValidationError)
     assert RECORD_LIMITS_SETTING in str(result.exception)
+
+
+NOW = datetime.datetime(2024, 2, 20, tzinfo=datetime.timezone.utc)
+
+
+def cta_requests(api, rows):
+    engine = api.serve(f"{BASE_URL}/v2/cockpit/cta/list", QueryEngine(rows, {"ModifiedDate"}, unordered=True))
+    deleted = api.serve(f"{BASE_URL}/v2/cockpit/cta/deleted/list", QueryEngine([], {"ModifiedDate"}, unordered=True))
+    return engine, deleted
+
+
+def test_a_limited_cta_read_skips_the_halving_and_the_second_read(api, tmp_path, monkeypatch):
+    # 1500 CTAs on one day would make a full read halve the window and read
+    # the day twice. A limited read sends one request for the newest window.
+    monkeypatch.setattr(streams_module, "utc_now", lambda: NOW)
+    serve_every_stream(api)
+    cta, _ = cta_requests(api, [cta_row(n, modified=cta_row(0)["ModifiedDate"]) for n in range(1500)])
+    messages = sample_run(tmp_path, {"cta": 10})
+    assert len(records(messages, "cta")) == 10
+    assert len(cta.bodies) == 1
+    assert cta.bodies[0]["pageSize"] == 10
+    assert cta.bodies[0]["pageNumber"] == 1
+
+
+def test_a_limited_cta_read_of_an_empty_tenant_sends_at_most_three_requests(api, tmp_path, monkeypatch):
+    monkeypatch.setattr(streams_module, "utc_now", lambda: NOW)
+    serve_every_stream(api)
+    cta, deleted = cta_requests(api, [])
+    messages = sample_run(tmp_path, {"cta": 10, "cta_deleted": 10})
+    assert records(messages, "cta") == []
+    assert len(cta.bodies) == 3
+    assert len(deleted.bodies) == 3
+    windows = [body["where"]["conditions"][0]["value"] for body in cta.bodies]
+    assert windows[0][1] == "2024-02-22"
+    assert [w[0] for w in windows] == [w[1] for w in windows[1:]] + [windows[-1][0]]
+
+
+def test_a_limited_cta_read_stops_at_the_start_date(api, tmp_path, monkeypatch):
+    monkeypatch.setattr(streams_module, "utc_now", lambda: NOW)
+    serve_every_stream(api)
+    cta, _ = cta_requests(api, [])
+    sample_run(tmp_path, {"cta": 10}, start_date="2024-01-01T00:00:00Z")
+    assert len(cta.bodies) == 1
+    assert cta.bodies[0]["where"]["conditions"][0]["value"][0] == "2023-12-31"
+
+
+def test_a_limited_query_page_asks_for_the_limit_only(api, tmp_path):
+    company, _ = serve_every_stream(api, company_rows=12)
+    sample_run(tmp_path, {"Company": 10})
+    assert company.bodies[0]["limit"] == 10

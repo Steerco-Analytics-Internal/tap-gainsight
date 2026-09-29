@@ -350,6 +350,9 @@ class CtaSlicedStream(GainsightStream):
     max_window_days = 366
     # The start when there is no bookmark and no start_date.
     history_start = datetime.datetime(2000, 1, 1, tzinfo=datetime.timezone.utc)
+    # A limited read, as in a field-sample job, reads at most this many
+    # windows of max_window_days, newest first.
+    limited_windows = 3
 
     def select_list(self) -> t.List[str]:
         raise NotImplementedError
@@ -358,6 +361,9 @@ class CtaSlicedStream(GainsightStream):
         first_day = (self.filter_start(context) or self.history_start).date()
         # Tomorrow, so a tenant time zone ahead of UTC is covered.
         last_day = (utc_now() + datetime.timedelta(days=1)).date()
+        if self.is_limited:
+            yield from self._limited_rows_newest_first(context, first_day, last_day)
+            return
         width = 1
         day = first_day
         while day <= last_day:
@@ -396,6 +402,25 @@ class CtaSlicedStream(GainsightStream):
                 if len(rows) < self.page_size:
                     break
                 page += 1
+
+    def _limited_rows_newest_first(
+        self, context: t.Optional[dict], first_day: datetime.date, last_day: datetime.date
+    ) -> t.Iterable[dict]:
+        """Read the first page of the newest windows only.
+
+        A limited read wants a few rows, not every row. So it skips the
+        halving and the second read of a full window, and it doesn't step
+        through years of empty windows from `history_start`.
+        """
+        end = last_day + datetime.timedelta(days=1)
+        for _ in range(self.limited_windows):
+            if end <= first_day:
+                return
+            start = max(end - datetime.timedelta(days=self.max_window_days), first_day)
+            yield from self.post_page(
+                context, {"mode": "window", "first": start, "last": end, "page": 1}
+            )
+            end = start
 
     def _read_pages(
         self, context: t.Optional[dict], token: dict, first: t.List[dict]

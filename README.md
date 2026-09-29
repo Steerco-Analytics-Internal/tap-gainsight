@@ -250,9 +250,13 @@ SDK doesn't, so the tap applies it.
   `deleted_records` reaches its limit, the other delete logs get no request.
 - A limited stream moves no bookmark, because it read only part of the data.
 - A stream it leaves out has no limit.
+- Each request asks for no more rows than the limit.
 - The whole-second chain can still send one drain request after a scan page
   before it emits that page's last second. So a limit of 10 costs at most a
   few requests per stream, never a full read.
+- The CTA streams read only the first page of the newest windows, at most
+  three windows of 366 days, and never before the bookmark or `start_date`.
+  They skip the halving and the second read of a full window.
 - Any other value, such as a string, 0 or a fraction, is a config error. A
   sync stops before any request. Discovery skips config validation, so it
   fails when it builds the streams.

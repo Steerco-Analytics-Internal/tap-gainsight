@@ -691,6 +691,8 @@ class GainsightStream(RESTStream):
             raise ConfigValidationError(str(exc)) from exc
         if limit is not None:
             self.ABORT_AT_RECORD_COUNT = limit
+            # A page never needs more rows than the limit.
+            self.page_size = min(self.page_size, limit)
 
     @property
     def is_limited(self) -> bool:
