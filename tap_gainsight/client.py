@@ -9,13 +9,18 @@ The README has the full table. Doc links used in this module:
   https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Company_and_Relationship_API/Company_API_Documentation
 - Custom Object API (query shape, empty result, epoch dates):
   https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Custom_Object_API/Gainsight_Custom_Object_API_Documentation
+- Generate REST API Key (M2M OAuth token request and response):
+  https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Generate_REST_API/Generate_REST_API_Key
 """
 
 from __future__ import annotations
 
+import base64
 import collections
 import datetime
 import http.cookiejar
+import logging
+import math
 import re
 import threading
 import time
@@ -50,6 +55,24 @@ RATE_LIMIT_PERIOD_SECONDS = 60.0
 
 # Docs, Data Management APIs, "Get API - categoryID", Sample Failure Response.
 UNAUTHORIZED_ERROR_CODE = "GS_APIG_2401"
+# Seen from a live tenant: "IP Address does not lie in range of whitelisted
+# ips". Access-key connections must list caller IPs. M2M OAuth need not.
+IP_NOT_ALLOWED_ERROR_CODE = "GS_APIG_2402"
+IP_NOT_ALLOWED_MESSAGE = (
+    "Gainsight refused the request because this connection only allows listed "
+    "IP addresses. Use M2M OAuth credentials (OAuth API Key and Secret), which "
+    "have no IP requirement, or ask your Gainsight admin to allow the caller's "
+    "IP address."
+)
+# Generate REST API Key, "Get Access Token API", Sample Success Response:
+# "expires_in": 86400. The tap uses it when a response leaves it out.
+DEFAULT_TOKEN_LIFETIME_SECONDS = 86400
+# A token this close to expiry is replaced before the next call. A short
+# lifetime uses half of it instead, so a token is never stale on arrival.
+TOKEN_REFRESH_MARGIN_SECONDS = 300
+# After an auth failure, a token younger than this is not replaced. A
+# fresh token that fails will fail again, so the run stops instead.
+TOKEN_MIN_AGE_FOR_REFRESH_SECONDS = 10
 # Documented empty replies. Company API, "Read API", Sample Failure
 # Response: "No data found for given criteria". Error Codes article:
 # GSOBJ_1011, "No entity matches the given criteria", HTTP 400.
@@ -101,6 +124,13 @@ class GainsightAuthError(GainsightAPIError):
 
 class GainsightRedirectError(GainsightAuthError):
     """Raised on a 3xx. The access key is never sent to another host."""
+
+
+class GainsightTokenError(GainsightAPIError):
+    """Raised when the M2M OAuth token request fails, for any reason.
+
+    Discovery never treats it as a failure of one object.
+    """
 
 
 class _RetriableError(GainsightAPIError):
@@ -212,7 +242,8 @@ KNOWN_ERRORS = {
     "GSOBJ_1005": "a date or date-time value has an invalid format",
     "GSOBJ_1023": "the API path is invalid",
     "GSOBJ_1024": "the authorization headers are invalid",
-    "GS_APIG_2401": "the access key was rejected",
+    "GS_APIG_2401": "Gainsight rejected the credential",
+    "GS_APIG_2402": "the caller's IP address is not on the connection's allowlist",
     "COCKPIT_5101": "the CTA request is invalid",
     "OBJECT_NOT_FOUND": "the object was not found",
 }
@@ -230,14 +261,43 @@ def _code_field(name: str, value: t.Any) -> str:
     return f"{name} {value} ({known})" if known else f"{name} {value}"
 
 
-def response_summary(response: requests.Response) -> str:
+def request_secrets(request: t.Any) -> t.List[str]:
+    """Return the credential values in a request's headers.
+
+    That is the AccessKey value, the whole Authorization value, the part
+    after its scheme, and for Basic, the decoded client ID and secret.
+    """
+    headers = getattr(request, "headers", None) or {}
+    found = [headers.get("AccessKey") or ""]
+    authorization = headers.get("Authorization") or ""
+    found.append(authorization)
+    scheme, _, credential = authorization.partition(" ")
+    found.append(credential)
+    if scheme == "Basic":
+        try:
+            pair = base64.b64decode(credential, validate=True).decode("utf-8")
+        except ValueError:
+            pair = ""
+        found += [pair, *pair.split(":", 1)]
+    return [value for value in found if value]
+
+
+def redact(text: str, secrets: t.Iterable[str]) -> str:
+    """Replace each secret in `text` with ***, longest first."""
+    for secret in sorted({s for s in secrets if s}, key=len, reverse=True):
+        text = text.replace(secret, "***")
+    return text
+
+
+def response_summary(response: requests.Response, secrets: t.Iterable[str] = ()) -> str:
     """Describe an error response without its data.
 
     For the documented error shape: the status, and `errorCode` and `title`
     when each is a code of up to 50 capitals, digits and underscores. A
     known code adds the tap's own fixed description. Any other value gives
     only its type or length. `errorDesc` is never included. For any other
-    body: the status and the body length.
+    body: the status and the body length. The request's credentials and
+    `secrets` are redacted.
     """
     payload = json_or_none(response)
     parts = [f"HTTP {response.status_code}"]
@@ -248,10 +308,9 @@ def response_summary(response: requests.Response) -> str:
     else:
         parts.append(f"a {len(response.content or b'')}-byte body")
     text = ", ".join(parts)
-    # A code-shaped access key could pass the code check. Redact it anyway.
+    # A code-shaped credential could pass the code check. Redact it anyway.
     request = getattr(response, "request", None)
-    key = request.headers.get("AccessKey") if request is not None else None
-    return text.replace(key, "***") if key else text
+    return redact(text, [*request_secrets(request), *secrets])
 
 
 def refuse_cookies(session: requests.Session) -> None:
@@ -299,13 +358,18 @@ def is_unauthorized_payload(payload: t.Any) -> bool:
     return isinstance(payload, dict) and _code(payload) in AUTH_ERROR_CODES
 
 
+def is_ip_not_allowed_payload(payload: t.Any) -> bool:
+    """Return True when a body carries GS_APIG_2402, the IP allowlist refusal."""
+    return isinstance(payload, dict) and _code(payload) == IP_NOT_ALLOWED_ERROR_CODE
+
+
 def redirect_message(response: requests.Response, label: str) -> str:
     """Describe a refused redirect, naming the host it pointed to."""
     location = response.headers.get("Location") or ""
     host = urlparse(location).netloc or location or "an unknown host"
     return (
         f"{response.status_code} redirect from {label} to {host}. The tap does "
-        "not follow redirects, so the access key never goes to another host. "
+        "not follow redirects, so no credential goes to another host. "
         "Check the `domain` setting."
     )
 
@@ -495,12 +559,293 @@ def is_date_type(data_type: t.Optional[str]) -> bool:
     return kind in DATE_DATA_TYPES or kind in DATETIME_DATA_TYPES
 
 
+def _has_control_characters(value: str) -> bool:
+    return any(ord(char) < 32 or ord(char) == 127 for char in value)
+
+
+def _is_set(config: t.Mapping[str, t.Any], name: str) -> bool:
+    """Return True when a setting has a value. An empty string is unset."""
+    value = config.get(name)
+    return value is not None and value != ""
+
+
+def _check_credential(config: t.Mapping[str, t.Any], name: str) -> None:
+    """Raise ValueError unless a credential can go in a header as is.
+
+    The message names the setting and never includes its value.
+    """
+    value = config.get(name)
+    if not isinstance(value, str) or value != value.strip() or _has_control_characters(value):
+        raise ValueError(
+            f"The `{name}` setting must be text with no leading or trailing "
+            "whitespace and no control characters."
+        )
+
+
+class AuthChoice(t.NamedTuple):
+    method: str  # "access_key" or "oauth".
+    # A log line about settings the choice ignores: (level, message).
+    notice: t.Optional[t.Tuple[int, str]] = None
+
+
+def choose_auth(config: t.Mapping[str, t.Any]) -> AuthChoice:
+    """Choose the credential method. Raise ValueError when none is usable.
+
+    Both `client_id` and `client_secret` select M2M OAuth, and a stored
+    `access_key` is then ignored. A settings form may keep an old secret it
+    cannot clear, so the pair wins instead of failing. Otherwise
+    `access_key` is used. Only the credentials in use are checked. No
+    message includes a value.
+    """
+    has_key = _is_set(config, "access_key")
+    has_id = _is_set(config, "client_id")
+    has_secret = _is_set(config, "client_secret")
+    if has_id and has_secret:
+        _check_credential(config, "client_id")
+        _check_credential(config, "client_secret")
+        notice = None
+        if has_key:
+            notice = (
+                logging.INFO,
+                "Using M2M OAuth from `client_id` and `client_secret`. The "
+                "stored `access_key` is ignored.",
+            )
+        return AuthChoice("oauth", notice)
+    if has_key:
+        _check_credential(config, "access_key")
+        notice = None
+        if has_id or has_secret:
+            missing = "client_secret" if has_id else "client_id"
+            notice = (
+                logging.WARNING,
+                f"M2M OAuth needs `{missing}`, which is not set. Using "
+                "`access_key` instead.",
+            )
+        return AuthChoice("access_key", notice)
+    if has_id or has_secret:
+        raise ValueError(
+            "M2M OAuth needs both `client_id` (the OAuth API Key) and "
+            "`client_secret` (the OAuth API Secret). One of them is missing."
+        )
+    raise ValueError(
+        "No credentials are set. Set `access_key`, or `client_id` and "
+        "`client_secret` for M2M OAuth."
+    )
+
+
+def auth_method(config: t.Mapping[str, t.Any]) -> str:
+    """Return "access_key" or "oauth". See choose_auth."""
+    return choose_auth(config).method
+
+
+class GainsightAuth:
+    """Supplies the credential header for every API call in a tap run.
+
+    With `access_key`, it is the AccessKey header. With M2M OAuth, it is a
+    Bearer token from the token request. The token is fetched before the
+    first call and kept in memory only. It is fetched again near expiry,
+    and after an auth failure when `refresh_after_failure` allows it. One
+    instance is shared by every stream and metadata call.
+    """
+
+    def __init__(
+        self,
+        config: t.Mapping[str, t.Any],
+        rate_limiter: RateLimiter,
+        budget: t.Optional[safety.RequestBudget] = None,
+        session: t.Optional[requests.Session] = None,
+    ) -> None:
+        self.host = pinned_host(config["domain"], config.get("custom_domain"))
+        choice = choose_auth(config)
+        self.method = choice.method
+        self.notice = choice.notice
+        self.rate_limiter = rate_limiter
+        self.budget = budget
+        self._access_key = str(config.get("access_key") or "")
+        self._client_id = str(config.get("client_id") or "")
+        self._client_secret = str(config.get("client_secret") or "")
+        self._token: t.Optional[str] = None
+        self._fetched_at = 0.0
+        self._expires_at = 0.0
+        self._margin = float(TOKEN_REFRESH_MARGIN_SECONDS)
+        self._lock = threading.Lock()
+        self._session = session or requests.Session()
+        self._session.trust_env = False
+        refuse_cookies(self._session)
+
+    @property
+    def is_oauth(self) -> bool:
+        return self.method == "oauth"
+
+    @property
+    def credential(self) -> str:
+        """Names what Gainsight rejected on an auth failure."""
+        return "the OAuth access token" if self.is_oauth else "the access key"
+
+    @property
+    def settings_hint(self) -> str:
+        """Names the settings to check on an auth failure."""
+        if self.is_oauth:
+            return "`client_id`, `client_secret` and `domain`"
+        return "`access_key` and `domain`"
+
+    def headers(self) -> t.Dict[str, str]:
+        """Return the credential header for the next API call."""
+        if not self.is_oauth:
+            # Docs: pass the access key in the "accesskey" header.
+            return {"AccessKey": self._access_key}
+        return {"Authorization": f"Bearer {self.token()}"}
+
+    def token(self) -> str:
+        """Return a token with more than the refresh margin left."""
+        with self._lock:
+            now = time.monotonic()
+            if self._token is None or now >= self._expires_at - self._margin:
+                self._fetch()
+            assert self._token is not None
+            return self._token
+
+    @staticmethod
+    def token_in(headers: t.Mapping[str, str]) -> t.Optional[str]:
+        """Return the Bearer token a request carried, or None."""
+        scheme, _, token = (headers.get("Authorization") or "").partition(" ")
+        return token if scheme == "Bearer" and token else None
+
+    def refresh_after_failure(self, failed_token: t.Optional[str]) -> bool:
+        """Fetch a new token after an auth failure. Return True if it did.
+
+        Only when the token that failed is still the current one, and was
+        fetched more than TOKEN_MIN_AGE_FOR_REFRESH_SECONDS ago. Otherwise
+        the caller raises the auth error at once. This keeps a run from
+        fetching a token per page or per retry.
+        """
+        with self._lock:
+            if failed_token is None or failed_token != self._token:
+                return False
+            if time.monotonic() - self._fetched_at <= TOKEN_MIN_AGE_FOR_REFRESH_SECONDS:
+                return False
+            self._fetch()
+            return True
+
+    def failed_auth(self, response: requests.Response) -> bool:
+        """Return True when an OAuth call failed on its credential.
+
+        That is HTTP 401, or a documented auth error code at any status.
+        """
+        return self.is_oauth and (
+            response.status_code == 401 or is_unauthorized_payload(json_or_none(response))
+        )
+
+    def secrets(self) -> t.List[str]:
+        """Every credential value, for redaction."""
+        return [
+            value
+            for value in (self._access_key, self._client_id, self._client_secret, self._token)
+            if value
+        ]
+
+    def _fetch(self) -> None:
+        label = "the OAuth token request"
+        basic = base64.b64encode(f"{self._client_id}:{self._client_secret}".encode("utf-8")).decode("ascii")
+        # Docs, Get Access Token API: POST to the token path with the header
+        # "Authorization: Basic base64(client_id:client_secret)".
+        request = requests.Request(
+            "POST",
+            f"https://{self.host}{safety.TOKEN_PATH}",
+            data=dict(safety.TOKEN_BODY),
+            headers={"Authorization": f"Basic {basic}", "Accept": "application/json"},
+        )
+
+        @backoff.on_exception(
+            lambda: backoff.expo(factor=2, max_value=MAX_WAIT_SECONDS),
+            (
+                _RetriableError,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+            ),
+            max_tries=MAX_TRIES,
+        )
+        def _call() -> requests.Response:
+            response = safety.send(
+                self._session,
+                self._session.prepare_request(request),
+                self.rate_limiter,
+                self.budget,
+                pinned_host=self.host,
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+            status = response.status_code
+            if status == 429 or status >= 500:
+                raise _RetriableError(
+                    f"{status} from {label}: {response_summary(response, self.secrets())}", status
+                )
+            return response
+
+        # `from None` everywhere below: a chained exception could carry a
+        # credential in its message or in the traceback.
+        try:
+            response = _call()
+        except _RetriableError as exc:
+            raise GainsightTokenError(
+                f"{exc} (gave up after {MAX_TRIES} tries)", exc.status_code
+            ) from None
+        except requests.exceptions.RequestException as exc:
+            raise GainsightTokenError(
+                redact(f"{label} failed: {exc}", [*self.secrets(), basic])
+            ) from None
+
+        status = response.status_code
+        summary = response_summary(response, self.secrets())
+        if 300 <= status < 400:
+            raise GainsightTokenError(redirect_message(response, label), status)
+        payload = json_or_none(response)
+        if is_ip_not_allowed_payload(payload):
+            raise GainsightTokenError(f"{status}: {IP_NOT_ALLOWED_MESSAGE} Response: {summary}", status)
+        if status == 400:
+            raise GainsightTokenError(
+                f"400: Gainsight refused the token request. Check the OAuth API Key and "
+                f"Secret (`client_id` and `client_secret`) and `domain`. Response: {summary}",
+                status,
+            )
+        if status in (401, 403) or is_unauthorized_payload(payload):
+            raise GainsightTokenError(
+                f"{status}: Gainsight did not accept the OAuth API Key or Secret. "
+                f"Check `client_id`, `client_secret` and `domain`. Response: {summary}",
+                status,
+            )
+        if status >= 400:
+            raise GainsightTokenError(f"{status} from {label}: {summary}", status)
+        token = payload.get("access_token") if isinstance(payload, dict) else None
+        if not isinstance(token, str) or not safety.BEARER_TOKEN.fullmatch(token):
+            raise GainsightTokenError(
+                f"{label} returned no usable `access_token`. Response: {summary}", status
+            )
+        lifetime = payload.get("expires_in", DEFAULT_TOKEN_LIFETIME_SECONDS)
+        if (
+            isinstance(lifetime, bool)
+            or not isinstance(lifetime, (int, float))
+            or not math.isfinite(lifetime)
+            or lifetime <= 0
+        ):
+            raise GainsightTokenError(
+                f"{label} returned an `expires_in` that is not a finite positive "
+                f"number of seconds. Response: {summary}",
+                status,
+            )
+        now = time.monotonic()
+        self._token = token
+        self._fetched_at = now
+        self._expires_at = now + lifetime
+        self._margin = min(float(TOKEN_REFRESH_MARGIN_SECONDS), lifetime / 2)
+
+
 class GainsightMetadataClient:
     """Calls the Data Management metadata APIs used at discovery time.
 
     Retries 429, 5xx, connection errors and timeouts with exponential
     backoff. Raises GainsightAuthError on 401, 403 or the documented
-    `GS_APIG_2401` body, and GainsightAPIError on any other failure.
+    `GS_APIG_2401` body, GainsightTokenError when an OAuth token request
+    fails, and GainsightAPIError on any other failure.
     """
 
     # Docs, Data Management APIs, "Post Describe OMD", Sample Request. Only
@@ -527,20 +872,22 @@ class GainsightMetadataClient:
         rate_limiter: RateLimiter,
         session: t.Optional[requests.Session] = None,
         budget: t.Optional[safety.RequestBudget] = None,
+        auth: t.Optional[GainsightAuth] = None,
     ) -> None:
         self.host = pinned_host(config["domain"], config.get("custom_domain"))
         self.base_url = f"https://{self.host}"
         self.rate_limiter = rate_limiter
         self.budget = budget
+        self.auth = auth or GainsightAuth(config, rate_limiter, budget)
         self.session = session or requests.Session()
         # No .netrc or proxy settings: they could add an Authorization header.
         self.session.trust_env = False
         refuse_cookies(self.session)
-        # Docs: pass the access key in the "accesskey" header. Header names
-        # are case-insensitive in HTTP.
-        self.session.headers.update(
-            {"AccessKey": config["access_key"], "Accept": "application/json"}
-        )
+        self.session.headers.update({"Accept": "application/json"})
+        if not self.auth.is_oauth:
+            # Docs: pass the access key in the "accesskey" header. Header
+            # names are case-insensitive in HTTP.
+            self.session.headers.update(self.auth.headers())
 
     def _send(
         self,
@@ -552,6 +899,26 @@ class GainsightMetadataClient:
     ) -> dict:
         url = f"{self.base_url}{path}"
 
+        refreshed = False
+
+        def summary(response: requests.Response) -> str:
+            return response_summary(response, self.auth.secrets())
+
+        def _send_once() -> t.Tuple[requests.PreparedRequest, requests.Response]:
+            headers = self.auth.headers() if self.auth.is_oauth else None
+            prepared = self.session.prepare_request(
+                requests.Request(method, url, params=params, json=body, headers=headers)
+            )
+            response = safety.send(
+                self.session,
+                prepared,
+                self.rate_limiter,
+                self.budget,
+                pinned_host=self.host,
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+            return prepared, response
+
         @backoff.on_exception(
             lambda: backoff.expo(factor=2, max_value=MAX_WAIT_SECONDS),
             (
@@ -562,56 +929,52 @@ class GainsightMetadataClient:
             max_tries=MAX_TRIES,
         )
         def _call() -> requests.Response:
-            prepared = self.session.prepare_request(
-                requests.Request(method, url, params=params, json=body)
-            )
-            response = safety.send(
-                self.session,
-                prepared,
-                self.rate_limiter,
-                self.budget,
-                pinned_host=self.host,
-                timeout=REQUEST_TIMEOUT_SECONDS,
-            )
+            nonlocal refreshed
+            prepared, response = _send_once()
+            # A token can lapse early. At most one new token and one retry
+            # per call, across every backoff attempt.
+            if not refreshed and self.auth.failed_auth(response):
+                refreshed = True
+                if self.auth.refresh_after_failure(self.auth.token_in(prepared.headers)):
+                    _, response = _send_once()
             status = response.status_code
             if status == 429 or status >= 500:
-                raise _RetriableError(
-                    f"{status} from {label}: {response_summary(response)}", status
-                )
+                raise _RetriableError(f"{status} from {label}: {summary(response)}", status)
             return response
 
+        # `from None`: a chained exception could carry a credential.
         try:
             response = _call()
         except _RetriableError as exc:
             raise GainsightAPIError(
                 f"{exc} (gave up after {MAX_TRIES} tries)", exc.status_code
-            ) from exc
+            ) from None
         except requests.exceptions.RequestException as exc:
-            raise GainsightAPIError(f"{label} failed: {exc}") from exc
+            raise GainsightAPIError(redact(f"{label} failed: {exc}", self.auth.secrets())) from None
 
         status = response.status_code
         if 300 <= status < 400:
             raise GainsightRedirectError(redirect_message(response, label), status)
         payload = json_or_none(response)
+        if is_ip_not_allowed_payload(payload):
+            raise GainsightAuthError(
+                f"{status}: {IP_NOT_ALLOWED_MESSAGE} Response: {summary(response)}", status
+            )
         if status in (401, 403) or is_unauthorized_payload(payload):
             raise GainsightAuthError(
-                f"{status}: Gainsight rejected the access key on {label}. Check "
-                f"`access_key` and `domain`. Response: {response_summary(response)}",
+                f"{status}: Gainsight rejected {self.auth.credential} on {label}. Check "
+                f"{self.auth.settings_hint}. Response: {summary(response)}",
                 status,
             )
         if status >= 400:
-            raise GainsightAPIError(
-                f"{status} from {label}: {response_summary(response)}", status
-            )
+            raise GainsightAPIError(f"{status} from {label}: {summary(response)}", status)
         if not isinstance(payload, dict):
             raise GainsightAPIError(
-                f"{label} did not return a JSON object: {response_summary(response)}",
+                f"{label} did not return a JSON object: {summary(response)}",
                 status,
             )
         if payload.get("result") is False:
-            raise GainsightAPIError(
-                f"{label} failed: {response_summary(response)}", status
-            )
+            raise GainsightAPIError(f"{label} failed: {summary(response)}", status)
         return payload
 
     def list_objects(self) -> t.List[dict]:
@@ -721,10 +1084,15 @@ class GainsightStream(RESTStream):
         return session
 
     @property
+    def auth(self) -> GainsightAuth:
+        return self._tap.auth  # type: ignore[attr-defined]
+
+    @property
     def http_headers(self) -> dict:
-        # Docs: header "accesskey" and "Content Type: JSON". The SDK sends the
-        # body with `json=`, which sets Content-Type: application/json.
-        headers = {"AccessKey": self.config["access_key"]}
+        # Docs: header "accesskey" or, for M2M OAuth, a Bearer token, and
+        # "Content Type: JSON". The SDK sends the body with `json=`, which
+        # sets Content-Type: application/json.
+        headers = self.auth.headers()
         if "user_agent" in self.config:
             headers["User-Agent"] = self.config["user_agent"]
         return headers
@@ -732,6 +1100,9 @@ class GainsightStream(RESTStream):
     @property
     def rate_limiter(self) -> RateLimiter:
         return self._tap.rate_limiter  # type: ignore[attr-defined]
+
+    # The prepared request that already had its one auth retry.
+    _auth_retried_for: t.Any = None
 
     def _request(
         self,
@@ -741,27 +1112,49 @@ class GainsightStream(RESTStream):
         # Runs once per attempt, so retries count against the limits too.
         # safety.send refuses anything but an allowed read, and never
         # follows a redirect.
-        response = safety.send(
-            self.requests_session,
-            prepared_request,
-            self.rate_limiter,
-            self._tap.request_budget,  # type: ignore[attr-defined]
-            pinned_host=self.pinned_host,
-            timeout=self.timeout,
-        )
+        def send() -> t.Tuple[requests.PreparedRequest, requests.Response]:
+            prepared = prepared_request
+            if self.auth.is_oauth:
+                # The token may have been replaced since the request was built.
+                prepared = prepared_request.copy()
+                prepared.headers.update(self.auth.headers())
+            response = safety.send(
+                self.requests_session,
+                prepared,
+                self.rate_limiter,
+                self._tap.request_budget,  # type: ignore[attr-defined]
+                pinned_host=self.pinned_host,
+                timeout=self.timeout,
+            )
+            return prepared, response
+
+        sent, response = send()
+        # A token can lapse early. The SDK retries a page by calling this
+        # again with the same prepared request, so one page gets at most
+        # one new token and one retry, across every backoff attempt.
+        if self._auth_retried_for is not prepared_request and self.auth.failed_auth(response):
+            self._auth_retried_for = prepared_request
+            if self.auth.refresh_after_failure(self.auth.token_in(sent.headers)):
+                _, response = send()
         self._write_request_duration_log(
             endpoint=self.path, response=response, context=context, extra_tags=None
         )
         self.validate_response(response)
         return response
 
+    def summary(self, response: requests.Response) -> str:
+        """response_summary, with every configured credential redacted."""
+        return response_summary(response, self.auth.secrets())
+
     def response_error_message(self, response: requests.Response) -> str:
         message = super().response_error_message(response)
         if response.status_code in (401, 403) or is_unauthorized_payload(
             json_or_none(response)
         ):
-            message += ". Gainsight rejected the access key. Check `access_key` and `domain`"
-        return f"{message}. Response: {response_summary(response)}"
+            message += (
+                f". Gainsight rejected {self.auth.credential}. Check {self.auth.settings_hint}"
+            )
+        return redact(f"{message}. Response: {self.summary(response)}", self.auth.secrets())
 
     def is_empty_reply(self, response: requests.Response, payload: t.Any) -> bool:
         """Return True when a non-success reply means "no rows" for this stream."""
@@ -782,21 +1175,25 @@ class GainsightStream(RESTStream):
         if status < 500 and status != 429:
             if is_no_data_response(payload) or self.is_empty_reply(response, payload):
                 return
+        if is_ip_not_allowed_payload(payload):
+            raise FatalAPIError(
+                f"{status}: {IP_NOT_ALLOWED_MESSAGE} Path {path}. Response: {self.summary(response)}"
+            )
         super().validate_response(response)
         if payload is None:
             raise FatalAPIError(
                 f"{status}: the response for path {path} is not JSON. "
-                f"Response: {response_summary(response)}"
+                f"Response: {self.summary(response)}"
             )
         if is_unauthorized_payload(payload):
             raise FatalAPIError(
-                f"{status}: Gainsight rejected the access key for path {path}. "
-                f"Check `access_key` and `domain`. Response: {response_summary(response)}"
+                f"{status}: Gainsight rejected {self.auth.credential} for path {path}. "
+                f"Check {self.auth.settings_hint}. Response: {self.summary(response)}"
             )
         if isinstance(payload, dict) and payload.get("result") is False:
             raise FatalAPIError(
                 f"{status}: Gainsight returned result=false for path {path}. "
-                f"Response: {response_summary(response)}"
+                f"Response: {self.summary(response)}"
             )
 
     def backoff_wait_generator(self) -> t.Generator[float, None, None]:

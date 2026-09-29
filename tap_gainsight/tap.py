@@ -11,12 +11,15 @@ from singer_sdk import typing as th
 
 from tap_gainsight.client import (
     GainsightAPIError,
+    GainsightAuth,
     GainsightAuthError,
     GainsightMetadataClient,
+    GainsightTokenError,
     DEFAULT_REQUESTS_PER_MINUTE,
     RATE_LIMIT_CALLS,
     RECORD_LIMITS_SETTING,
     RateLimiter,
+    auth_method,
     load_zone,
     pinned_host,
     record_limits,
@@ -71,9 +74,29 @@ class TapGainsight(Tap):
         th.Property(
             "access_key",
             th.StringType,
-            required=True,
             secret=True,
-            description="Gainsight REST API Access Key, sent as the AccessKey header.",
+            description=(
+                "Gainsight REST API Access Key, sent as the AccessKey header. "
+                "Used only when `client_id` and `client_secret` are not both set."
+            ),
+        ),
+        th.Property(
+            "client_id",
+            th.StringType,
+            secret=True,
+            description=(
+                "Gainsight M2M OAuth \"OAuth API Key\", for OAuth instead of "
+                "`access_key`. Set it with `client_secret`."
+            ),
+        ),
+        th.Property(
+            "client_secret",
+            th.StringType,
+            secret=True,
+            description=(
+                "Gainsight M2M OAuth \"OAuth API Secret\", for OAuth instead of "
+                "`access_key`. Set it with `client_id`."
+            ),
         ),
         th.Property(
             "domain",
@@ -161,6 +184,10 @@ class TapGainsight(Tap):
         )
         problems: t.List[str] = []
         try:
+            auth_method(self.config)
+        except ValueError as exc:
+            problems.append(str(exc))
+        try:
             pinned_host(self.config.get("domain"), self.config.get("custom_domain"))
         except ValueError as exc:
             problems.append(str(exc))
@@ -199,6 +226,7 @@ class TapGainsight(Tap):
         return warnings, errors
 
     _request_budget: t.Optional[RequestBudget] = None
+    _auth: t.Optional[GainsightAuth] = None
 
     @property
     def rate_limiter(self) -> RateLimiter:
@@ -214,9 +242,25 @@ class TapGainsight(Tap):
             self._request_budget = RequestBudget(self.config.get("max_requests"))
         return self._request_budget
 
+    @property
+    def auth(self) -> GainsightAuth:
+        """One credential source for the whole run, so a token is fetched once.
+
+        Discovery skips config validation, so a bad credential setting
+        raises ConfigValidationError here, before any request.
+        """
+        if self._auth is None:
+            try:
+                self._auth = GainsightAuth(self.config, self.rate_limiter, self.request_budget)
+            except ValueError as exc:
+                raise ConfigValidationError(f"Config validation failed: {exc}") from exc
+            if self._auth.notice:
+                self.logger.log(*self._auth.notice)
+        return self._auth
+
     def metadata_client(self) -> GainsightMetadataClient:
         return GainsightMetadataClient(
-            self.config, self.rate_limiter, budget=self.request_budget
+            self.config, self.rate_limiter, budget=self.request_budget, auth=self.auth
         )
 
     def _describe_all(
@@ -228,8 +272,8 @@ class TapGainsight(Tap):
         """Describe objects in batches. Drop a failing optional object.
 
         A failed batch is retried one object at a time, so one bad object
-        does not drop the others. Auth errors, and any failure on a required
-        object, raise.
+        does not drop the others. Auth errors, token request errors, and any
+        failure on a required object, raise.
         """
         described: t.Dict[str, dict] = {}
         dropped: t.Set[str] = set()
@@ -238,7 +282,7 @@ class TapGainsight(Tap):
             try:
                 described.update(client.describe(batch))
                 continue
-            except GainsightAuthError:
+            except (GainsightAuthError, GainsightTokenError):
                 raise
             except GainsightAPIError as exc:
                 if len(batch) == 1:
@@ -254,7 +298,7 @@ class TapGainsight(Tap):
             for name in batch:
                 try:
                     described.update(client.describe([name]))
-                except GainsightAuthError:
+                except (GainsightAuthError, GainsightTokenError):
                     raise
                 except GainsightAPIError as exc:
                     self._drop_or_raise(name, exc, required)
@@ -294,7 +338,7 @@ class TapGainsight(Tap):
                     continue
                 try:
                     dropdowns[category] = client.dropdown_items(category)
-                except GainsightAuthError:
+                except (GainsightAuthError, GainsightTokenError):
                     raise
                 except GainsightAPIError as exc:
                     self.logger.warning(
