@@ -30,7 +30,7 @@ try:
 except ImportError:  # Python before 3.9.
     from backports.zoneinfo import ZoneInfo, ZoneInfoNotFoundError  # type: ignore
 from singer_sdk import metrics
-from singer_sdk.exceptions import FatalAPIError
+from singer_sdk.exceptions import ConfigValidationError, FatalAPIError
 from singer_sdk.streams import RESTStream
 
 from tap_gainsight import safety
@@ -71,6 +71,9 @@ FILTER_LOOKBACK = datetime.timedelta(hours=24)
 # available for retrieval via REST API only for 15 days after deletion."
 DELETE_RETENTION = datetime.timedelta(days=15)
 EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+# Hotglue's field-sample job sends a record limit per stream in this setting.
+# Hotglue's own SDK reads it. The Meltano SDK doesn't, so the tap applies it.
+RECORD_LIMITS_SETTING = "_hg_max_records_limit"
 
 # Gainsight data types with a known JSON shape. The docs name STRING, GSID,
 # DATETIME and LOOKUP as describe `dataType` values. The rest come from the
@@ -422,6 +425,27 @@ def as_utc(value: datetime.datetime) -> datetime.datetime:
     return plain.astimezone(datetime.timezone.utc)
 
 
+def record_limits(config: t.Mapping[str, t.Any]) -> t.Dict[str, int]:
+    """Return the record limit for each stream named in RECORD_LIMITS_SETTING.
+
+    Raises ValueError on a bad value, so it never turns into a full read.
+    """
+    raw = config.get(RECORD_LIMITS_SETTING)
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"{RECORD_LIMITS_SETTING} must be an object, got {type(raw).__name__}.")
+    limits: t.Dict[str, int] = {}
+    for name, limit in raw.items():
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError(
+                f"{RECORD_LIMITS_SETTING} for stream {name!r} must be a whole "
+                f"number of at least 1, got {limit!r}."
+            )
+        limits[str(name)] = limit
+    return limits
+
+
 def load_zone(name: t.Optional[str]) -> t.Optional[datetime.tzinfo]:
     """Return the IANA zone `name`, or None for UTC. Raises ValueError."""
     if not name:
@@ -658,6 +682,21 @@ class GainsightStream(RESTStream):
     # Fields whose epoch-millisecond values become ISO 8601 strings.
     date_fields: t.Set[str] = set()
 
+    def __init__(self, *args: t.Any, **kwargs: t.Any) -> None:
+        super().__init__(*args, **kwargs)
+        # Discovery skips config validation, so a bad value raises here too.
+        try:
+            limit = record_limits(self.config).get(self.name)
+        except ValueError as exc:
+            raise ConfigValidationError(str(exc)) from exc
+        if limit is not None:
+            self.ABORT_AT_RECORD_COUNT = limit
+
+    @property
+    def is_limited(self) -> bool:
+        """True when a record limit is set, as in a field-sample job or a dry run."""
+        return self.ABORT_AT_RECORD_COUNT is not None
+
     @property
     def url_base(self) -> str:
         return f"https://{self.pinned_host}"
@@ -784,15 +823,38 @@ class GainsightStream(RESTStream):
 
     _request_counter: t.Any = None
     _null_bookmark_rows = 0
+    _limited_rows = 0
 
     def request_records(self, context: t.Optional[dict]) -> t.Iterable[dict]:
+        # The limit counts rows across every partition of the stream, so a
+        # partition after the limit sends no request at all.
+        limit = self.ABORT_AT_RECORD_COUNT
+        if limit is not None and self._limited_rows >= limit:
+            return
         with metrics.http_request_counter(self.name, self.path) as counter:
             counter.context = context
             self._request_counter = counter
+            rows = self.fetch_rows(context)
             try:
-                yield from self.fetch_rows(context)
+                for row in rows:
+                    yield row
+                    self._limited_rows += 1
+                    if limit is not None and self._limited_rows >= limit:
+                        # Stop before the next request.
+                        return
             finally:
+                close = getattr(rows, "close", None)
+                if close is not None:
+                    close()
                 self._request_counter = None
+
+    def _check_max_record_limit(self, current_record_index: int) -> None:
+        """Leave the limit to request_records, so a limited sync ends cleanly.
+
+        The SDK raises an abort exception at the limit, and a sync outside a
+        dry run exits with an error. request_records stops at the limit
+        instead, before it sends another request.
+        """
 
     def fetch_rows(self, context: t.Optional[dict]) -> t.Iterable[dict]:
         raise NotImplementedError
@@ -839,6 +901,9 @@ class GainsightStream(RESTStream):
     def _increment_stream_state(
         self, latest_record: dict, *, context: t.Optional[dict] = None
     ) -> None:
+        # A record limit reads only part of the data, so it moves no bookmark.
+        if self.is_limited:
+            return
         # A null replication key cannot be compared, and the SDK raises a
         # TypeError on it. The record is still emitted. Only the bookmark
         # skips it.
@@ -849,6 +914,7 @@ class GainsightStream(RESTStream):
 
     def sync(self, context: t.Optional[dict] = None) -> None:
         self._null_bookmark_rows = 0
+        self._limited_rows = 0
         super().sync(context)
         if self._null_bookmark_rows:
             self.logger.warning(

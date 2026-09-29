@@ -77,6 +77,9 @@ The checks:
 - The default rate is 30 requests a minute, below Gainsight's documented
   100, to share the tenant's allowance. `max_requests_per_minute` can set 1
   to 100, and `max_requests` caps the run.
+- A field-sample job's record limit, `_hg_max_records_limit`, stops each
+  named stream before its next request. A bad value is a config error, so
+  it never turns into a full read. See [Record limits](#record-limits).
 - `batch_config` is rejected. The tap writes Singer messages to stdout only.
 
 ### What errors and logs show
@@ -115,6 +118,7 @@ connection, so no test can reach the network.
 | `max_requests_per_minute` | No | Client-side request rate, from 1 to 100. The default is 30, below Gainsight's documented 100, to share the tenant's allowance with other integrations. |
 | `max_requests` | No | Hard cap on requests in one run, retries and discovery included. The run stops with an error when it is reached. |
 | `objects` | No | Allowlist of MDA object API names, such as `["Person", "Renewal__gc"]`. When set, only `Company` and these objects get a stream. When not set, every readable object gets a stream. |
+| `_hg_max_records_limit` | No | Set by Hotglue, not by users. Maps stream names to the most records to write, as in `{"Company": 10}`. See [Record limits](#record-limits). |
 
 Example `config.json`:
 
@@ -233,6 +237,25 @@ When a run gets a catalog, the tap compares it with that discovery:
 - A selected stream or column that Gainsight no longer has, such as an
   object or field an admin deleted, logs a warning. The rest syncs. Run
   discovery again to update the catalog.
+
+## Record limits
+
+Hotglue's field-sample job sends `_hg_max_records_limit`, a map from stream
+name to a whole number of at least 1. Hotglue's own SDK reads it. The Meltano
+SDK doesn't, so the tap applies it.
+
+- A stream it names stops once it wrote that many records. It sends no
+  request after that, and the run exits without an error.
+- The limit counts across all partitions of a stream. After
+  `deleted_records` reaches its limit, the other delete logs get no request.
+- A limited stream moves no bookmark, because it read only part of the data.
+- A stream it leaves out has no limit.
+- The whole-second chain can still send one drain request after a scan page
+  before it emits that page's last second. So a limit of 10 costs at most a
+  few requests per stream, never a full read.
+- Any other value, such as a string, 0 or a fraction, is a config error. A
+  sync stops before any request. Discovery skips config validation, so it
+  fails when it builds the streams.
 
 ## Sync behavior
 
