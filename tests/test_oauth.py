@@ -71,34 +71,86 @@ def oauth_metadata_client(config=None):
 # 1. Config validation.
 
 
+def capture_tap_logs(caplog):
+    logging.getLogger("tap-gainsight").addHandler(caplog.handler)
+    caplog.set_level(logging.DEBUG)
+
+
+def auth_notices(caplog):
+    """The tap's log lines about which credential method it chose."""
+    return [
+        (record.levelno, record.getMessage())
+        for record in caplog.records
+        if record.getMessage().startswith(("Using M2M OAuth", "M2M OAuth needs"))
+    ]
+
+
 @pytest.mark.parametrize(
-    "credentials",
+    "credentials, method",
     [
-        {"access_key": ACCESS_KEY},
-        {"client_id": CLIENT_ID, "client_secret": CLIENT_SECRET},
+        ({"access_key": ACCESS_KEY}, "access_key"),
+        ({"client_id": CLIENT_ID, "client_secret": CLIENT_SECRET}, "oauth"),
+        # An empty string counts as absent, for all three settings.
+        ({"access_key": "", "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET}, "oauth"),
+        ({"access_key": ACCESS_KEY, "client_id": "", "client_secret": ""}, "access_key"),
     ],
 )
-def test_each_valid_credential_combination_passes(api, credentials):
+def test_each_plain_credential_choice_passes_without_a_notice(api, caplog, credentials, method):
+    capture_tap_logs(caplog)
     api.mocker.post(TOKEN_URL, json=token_response())
     tap = TapGainsight(config={"domain": "acme", **credentials}, parse_env_config=False)
-    assert tap.auth.method == ("oauth" if credentials.get("client_id") else "access_key")
+    assert tap.auth.method == method
+    assert auth_notices(caplog) == []
+
+
+@pytest.mark.parametrize("stored_key", [ACCESS_KEY, "  malformed key\n"])
+def test_an_oauth_pair_wins_over_a_stored_access_key(api, caplog, stored_key):
+    capture_tap_logs(caplog)
+    api.mocker.post(TOKEN_URL, json=token_response())
+    config = {"domain": "acme", "access_key": stored_key, "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET}
+    for validate in (True, False):
+        tap = TapGainsight(config=dict(config), parse_env_config=False, validate_config=validate)
+        assert tap.auth.method == "oauth"
+    # The stored key is never sent, even when it would fail validation.
+    assert api.mocker.request_history
+    for request in api.mocker.request_history:
+        assert "accesskey" not in {name.lower() for name in request.headers}
+    notices = auth_notices(caplog)
+    assert notices and {level for level, _ in notices} == {logging.INFO}
+    assert all("stored `access_key` is ignored" in message for _, message in notices)
+    for text in (caplog.text,):
+        for secret in (stored_key.strip(), CLIENT_ID, CLIENT_SECRET):
+            assert secret not in text
+
+
+@pytest.mark.parametrize(
+    "half, missing",
+    [({"client_id": CLIENT_ID}, "client_secret"), ({"client_secret": CLIENT_SECRET}, "client_id")],
+)
+def test_half_an_oauth_pair_with_an_access_key_uses_the_access_key(api, caplog, half, missing):
+    capture_tap_logs(caplog)
+    tap = TapGainsight(config={"domain": "acme", "access_key": ACCESS_KEY, **half}, parse_env_config=False)
+    assert tap.auth.method == "access_key"
+    assert all(r.headers.get("AccessKey") == ACCESS_KEY for r in api.mocker.request_history)
+    notices = auth_notices(caplog)
+    assert notices and {level for level, _ in notices} == {logging.WARNING}
+    assert all(f"needs `{missing}`, which is not set" in message for _, message in notices)
+    for secret in (ACCESS_KEY, CLIENT_ID, CLIENT_SECRET):
+        assert secret not in caplog.text
 
 
 @pytest.mark.parametrize(
     "credentials, message",
     [
         ({}, "No credentials are set"),
-        ({"access_key": ""}, "The `access_key` setting must be"),
-        ({"access_key": "", "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET}, "The `access_key` setting must be"),
-        ({"access_key": ACCESS_KEY, "client_id": CLIENT_ID}, "not both"),
-        ({"access_key": ACCESS_KEY, "client_secret": CLIENT_SECRET}, "not both"),
-        ({"access_key": ACCESS_KEY, "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET}, "not both"),
+        ({"access_key": "", "client_id": "", "client_secret": ""}, "No credentials are set"),
         ({"client_id": CLIENT_ID}, "needs both `client_id`"),
         ({"client_secret": CLIENT_SECRET}, "needs both `client_id`"),
-        ({"client_id": CLIENT_ID, "client_secret": ""}, "The `client_secret` setting must be"),
+        ({"client_id": CLIENT_ID, "client_secret": ""}, "needs both `client_id`"),
+        ({"access_key": "", "client_secret": CLIENT_SECRET}, "needs both `client_id`"),
     ],
 )
-def test_each_invalid_combination_fails_before_any_request(credentials, message):
+def test_each_unusable_combination_fails_before_any_request(credentials, message):
     with requests_mock_lib.Mocker() as m:
         with pytest.raises(ConfigValidationError, match=message) as info:
             TapGainsight(config={"domain": "acme", **credentials}, parse_env_config=False)
@@ -147,8 +199,9 @@ def test_a_malformed_credential_fails_validation_before_any_request(api, setting
 def test_a_credential_that_is_not_text_fails(setting):
     # The SDK turns secret settings into text, so this reaches only
     # callers that build a config by hand.
+    config = {"access_key": 12345} if setting == "access_key" else {**OAUTH_CONFIG, setting: 12345}
     with pytest.raises(ValueError, match=f"The `{setting}` setting must be"):
-        client.auth_method({**OAUTH_CONFIG, setting: 12345})
+        client.auth_method(config)
 
 
 def test_the_metadata_client_refuses_bad_credentials_before_any_request():

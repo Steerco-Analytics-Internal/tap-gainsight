@@ -19,6 +19,7 @@ import base64
 import collections
 import datetime
 import http.cookiejar
+import logging
 import math
 import re
 import threading
@@ -72,9 +73,6 @@ TOKEN_REFRESH_MARGIN_SECONDS = 300
 # After an auth failure, a token younger than this is not replaced. A
 # fresh token that fails will fail again, so the run stops instead.
 TOKEN_MIN_AGE_FOR_REFRESH_SECONDS = 10
-# The credential settings. Each is sent in a header, so a value must have
-# no surrounding whitespace and no control characters.
-CREDENTIAL_SETTINGS = ("access_key", "client_id", "client_secret")
 # Documented empty replies. Company API, "Read API", Sample Failure
 # Response: "No data found for given criteria". Error Codes article:
 # GSOBJ_1011, "No entity matches the given criteria", HTTP 400.
@@ -565,40 +563,65 @@ def _has_control_characters(value: str) -> bool:
     return any(ord(char) < 32 or ord(char) == 127 for char in value)
 
 
-def auth_method(config: t.Mapping[str, t.Any]) -> str:
-    """Return "access_key" or "oauth" for the configured credentials.
+def _is_set(config: t.Mapping[str, t.Any], name: str) -> bool:
+    """Return True when a setting has a value. An empty string is unset."""
+    value = config.get(name)
+    return value is not None and value != ""
 
-    Exactly one method must be set: `access_key`, or both `client_id` and
-    `client_secret`. Each credential that is set must be non-empty text
-    with no leading or trailing whitespace and no control characters.
-    Raises ValueError otherwise. The message never includes a value.
+
+def _check_credential(config: t.Mapping[str, t.Any], name: str) -> None:
+    """Raise ValueError unless a credential can go in a header as is.
+
+    The message names the setting and never includes its value.
     """
-    for name in CREDENTIAL_SETTINGS:
-        value = config.get(name)
-        if value is None:
-            continue
-        if (
-            not isinstance(value, str)
-            or not value
-            or value != value.strip()
-            or _has_control_characters(value)
-        ):
-            raise ValueError(
-                f"The `{name}` setting must be non-empty text with no leading or "
-                "trailing whitespace and no control characters."
-            )
-    has_key = config.get("access_key") is not None
-    has_id = config.get("client_id") is not None
-    has_secret = config.get("client_secret") is not None
-    if has_key and (has_id or has_secret):
+    value = config.get(name)
+    if not isinstance(value, str) or value != value.strip() or _has_control_characters(value):
         raise ValueError(
-            "Set one authentication method, not both: `access_key`, or "
-            "`client_id` and `client_secret` for M2M OAuth."
+            f"The `{name}` setting must be text with no leading or trailing "
+            "whitespace and no control characters."
         )
-    if has_key:
-        return "access_key"
+
+
+class AuthChoice(t.NamedTuple):
+    method: str  # "access_key" or "oauth".
+    # A log line about settings the choice ignores: (level, message).
+    notice: t.Optional[t.Tuple[int, str]] = None
+
+
+def choose_auth(config: t.Mapping[str, t.Any]) -> AuthChoice:
+    """Choose the credential method. Raise ValueError when none is usable.
+
+    Both `client_id` and `client_secret` select M2M OAuth, and a stored
+    `access_key` is then ignored. A settings form may keep an old secret it
+    cannot clear, so the pair wins instead of failing. Otherwise
+    `access_key` is used. Only the credentials in use are checked. No
+    message includes a value.
+    """
+    has_key = _is_set(config, "access_key")
+    has_id = _is_set(config, "client_id")
+    has_secret = _is_set(config, "client_secret")
     if has_id and has_secret:
-        return "oauth"
+        _check_credential(config, "client_id")
+        _check_credential(config, "client_secret")
+        notice = None
+        if has_key:
+            notice = (
+                logging.INFO,
+                "Using M2M OAuth from `client_id` and `client_secret`. The "
+                "stored `access_key` is ignored.",
+            )
+        return AuthChoice("oauth", notice)
+    if has_key:
+        _check_credential(config, "access_key")
+        notice = None
+        if has_id or has_secret:
+            missing = "client_secret" if has_id else "client_id"
+            notice = (
+                logging.WARNING,
+                f"M2M OAuth needs `{missing}`, which is not set. Using "
+                "`access_key` instead.",
+            )
+        return AuthChoice("access_key", notice)
     if has_id or has_secret:
         raise ValueError(
             "M2M OAuth needs both `client_id` (the OAuth API Key) and "
@@ -608,6 +631,11 @@ def auth_method(config: t.Mapping[str, t.Any]) -> str:
         "No credentials are set. Set `access_key`, or `client_id` and "
         "`client_secret` for M2M OAuth."
     )
+
+
+def auth_method(config: t.Mapping[str, t.Any]) -> str:
+    """Return "access_key" or "oauth". See choose_auth."""
+    return choose_auth(config).method
 
 
 class GainsightAuth:
@@ -628,7 +656,9 @@ class GainsightAuth:
         session: t.Optional[requests.Session] = None,
     ) -> None:
         self.host = pinned_host(config["domain"], config.get("custom_domain"))
-        self.method = auth_method(config)
+        choice = choose_auth(config)
+        self.method = choice.method
+        self.notice = choice.notice
         self.rate_limiter = rate_limiter
         self.budget = budget
         self._access_key = str(config.get("access_key") or "")

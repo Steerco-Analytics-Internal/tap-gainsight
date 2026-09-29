@@ -77,7 +77,7 @@ class TapGainsight(Tap):
             secret=True,
             description=(
                 "Gainsight REST API Access Key, sent as the AccessKey header. "
-                "Set it, or `client_id` and `client_secret`, not both."
+                "Used only when `client_id` and `client_secret` are not both set."
             ),
         ),
         th.Property(
@@ -254,6 +254,8 @@ class TapGainsight(Tap):
                 self._auth = GainsightAuth(self.config, self.rate_limiter, self.request_budget)
             except ValueError as exc:
                 raise ConfigValidationError(f"Config validation failed: {exc}") from exc
+            if self._auth.notice:
+                self.logger.log(*self._auth.notice)
         return self._auth
 
     def metadata_client(self) -> GainsightMetadataClient:

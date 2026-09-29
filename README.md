@@ -117,9 +117,9 @@ connection, so no test can reach the network.
 
 | Setting | Required | Description |
 |---|---|---|
-| `access_key` | One method | Gainsight REST API Access Key. The tap sends it in the `AccessKey` header. It is a secret. Gainsight requires an IP allowlist for access-key connections. |
-| `client_id` | One method | Gainsight M2M OAuth "OAuth API Key". Set it with `client_secret`, instead of `access_key`. It is a secret. |
-| `client_secret` | One method | Gainsight M2M OAuth "OAuth API Secret". Set it with `client_id`, instead of `access_key`. It is a secret. |
+| `access_key` | See [Authentication](#authentication) | Gainsight REST API Access Key. The tap sends it in the `AccessKey` header. It is a secret. Gainsight requires an IP allowlist for access-key connections. Ignored when `client_id` and `client_secret` are both set. |
+| `client_id` | See [Authentication](#authentication) | Gainsight M2M OAuth "OAuth API Key". Set it with `client_secret`. It is a secret. |
+| `client_secret` | See [Authentication](#authentication) | Gainsight M2M OAuth "OAuth API Secret". Set it with `client_id`. It is a secret. |
 | `domain` | Yes | Tenant host under gainsightcloud.com, such as `acme.gainsightcloud.com`, optionally after `https://`. A bare name with no dot, such as `acme`, becomes `acme.gainsightcloud.com`. See [Pinned host](#pinned-host). |
 | `custom_domain` | No | Only for a custom Gainsight domain, such as `companyapi.yourcompany.com`. It must equal the `domain` host. |
 | `start_date` | No | ISO 8601 date-time. The earliest modified date for incremental streams on their first run. |
@@ -141,10 +141,25 @@ Example `config.json`:
 
 ### Authentication
 
-Set exactly one method. Any other combination fails config validation
-before any request. Each credential must be non-empty, with no leading or
-trailing whitespace and no control characters, such as a tab or newline.
-The error names the setting and never shows its value.
+The tap chooses the method from the settings that have a value. An empty
+string counts as no value.
+
+| Settings with a value | Method | Log |
+|---|---|---|
+| `client_id` and `client_secret` | M2M OAuth | None |
+| `client_id`, `client_secret` and `access_key` | M2M OAuth. The access key is never sent or checked. | One info line: the stored `access_key` is ignored. |
+| `access_key` only | Access key | None |
+| `access_key` and one of `client_id` or `client_secret` | Access key | One warning that names the missing setting. |
+| One of `client_id` or `client_secret` only | None: a config error before any request | |
+| None | None: a config error before any request | |
+
+OAuth wins over a stored access key because a settings form can keep a
+secret it cannot clear. A connection can then move to OAuth without first
+removing its old key.
+
+Each credential in use must have no leading or trailing whitespace and no
+control characters, such as a tab or newline. Otherwise config validation
+fails. Messages and log lines name settings and never show a value.
 
 - **Access key:** `access_key`. Gainsight makes a connector IP allowlist
   mandatory for this method. Hotglue jobs call from changing IP addresses,
