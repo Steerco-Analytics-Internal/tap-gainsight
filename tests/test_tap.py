@@ -15,7 +15,9 @@ def test_streams_discoverable(api):
     assert all(s.name for s in streams)
 
 
-def test_access_key_is_a_secret():
-    schema = TapGainsight.config_jsonschema["properties"]["access_key"]
-    assert schema.get("secret") is True
-    assert TapGainsight.config_jsonschema["required"] == ["access_key", "domain"]
+def test_credentials_are_secrets():
+    properties = TapGainsight.config_jsonschema["properties"]
+    for name in ("access_key", "client_id", "client_secret"):
+        assert properties[name].get("secret") is True
+    # Either credential method may be set, so only domain is required.
+    assert TapGainsight.config_jsonschema["required"] == ["domain"]

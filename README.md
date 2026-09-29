@@ -51,6 +51,7 @@ endpoints the tap uses:
 | POST | `/v1/data/objects/query/{object}` (also timeline and the delete logs) | none | `select`, `where`, `orderBy`, `limit`, `offset` |
 | POST | `/v2/cockpit/cta/list` | none | `select`, `where`, `pageSize`, `pageNumber` |
 | POST | `/v2/cockpit/cta/deleted/list` | none | `select`, `where`, `pageSize`, `pageNumber` |
+| POST | `/v1/users/m2m/oauth/token` (M2M OAuth token request) | none | form data `grant_type=client_credentials` only |
 
 The checks:
 
@@ -60,16 +61,21 @@ The checks:
   `POST /v1/data/objects/{object}`.
 - A GET has no body. A POST body is a JSON object with only the read keys
   above, and no `records`, `data`, `lookups` or `updateKeys` key anywhere in
-  it.
-- Only these request headers are sent: `AccessKey`, `Content-Type`,
-  `Content-Length`, `User-Agent`, `Accept`, `Accept-Encoding` and
-  `Connection`. Any other, such as `Authorization` or a method-override
+  it. The token request is the one exception: its body is exactly the form
+  field `grant_type=client_credentials`.
+- Only these request headers are sent: `AccessKey`, `Authorization`,
+  `Content-Type`, `Content-Length`, `User-Agent`, `Accept`,
+  `Accept-Encoding` and `Connection`. Any other, such as a method-override
   header, is refused.
+- `Authorization` is allowed only in the form each request needs. The token
+  request must carry `Basic` and no `AccessKey`. Every other request may
+  carry only `Bearer`, and never together with `AccessKey`. The token
+  request goes to the pinned host, like every other call.
 - Every session has `trust_env` off, so `.netrc` files and proxy settings
   cannot add headers. `send` refuses a session with it on.
 - Every session refuses to store cookies, so a load balancer cookie such as
   `AWSALB` is never sent back. A `Cookie` header is still refused.
-- Redirects are never followed, so the access key never goes to another host.
+- Redirects are never followed, so no credential goes to another host.
 - Object names from the object list that are not plain identifiers are
   skipped. Names in the `objects` setting must be plain identifiers, or
   config validation fails. Every host and name pattern must match the whole
@@ -93,12 +99,13 @@ shape, a message gives:
 - `errorCode` and `title`, only when each is a code of up to 50 capitals,
   digits and underscores. Any other value gives only its type or length;
 - the tap's own fixed description for a code it handles: GSOBJ_1011,
-  GSOBJ_1005, GSOBJ_1023, GSOBJ_1024, GS_APIG_2401, COCKPIT_5101 and
-  OBJECT_NOT_FOUND.
+  GSOBJ_1005, GSOBJ_1023, GSOBJ_1024, GS_APIG_2401, GS_APIG_2402,
+  COCKPIT_5101 and OBJECT_NOT_FOUND.
 
 For any other body, a message gives the status and the body length only.
 An unexpected response shape is described by its key names and types. Any
-echoed access key is replaced by `***`.
+echoed credential is replaced by `***`: the access key, the client ID and
+secret, the `Basic` header value and the `Bearer` token.
 
 ### Tests
 
@@ -110,7 +117,9 @@ connection, so no test can reach the network.
 
 | Setting | Required | Description |
 |---|---|---|
-| `access_key` | Yes | Gainsight REST API Access Key. The tap sends it in the `AccessKey` header. It is a secret. |
+| `access_key` | One method | Gainsight REST API Access Key. The tap sends it in the `AccessKey` header. It is a secret. Gainsight requires an IP allowlist for access-key connections. |
+| `client_id` | One method | Gainsight M2M OAuth "OAuth API Key". Set it with `client_secret`, instead of `access_key`. It is a secret. |
+| `client_secret` | One method | Gainsight M2M OAuth "OAuth API Secret". Set it with `client_id`, instead of `access_key`. It is a secret. |
 | `domain` | Yes | Tenant host under gainsightcloud.com, such as `acme.gainsightcloud.com`, optionally after `https://`. A bare name with no dot, such as `acme`, becomes `acme.gainsightcloud.com`. See [Pinned host](#pinned-host). |
 | `custom_domain` | No | Only for a custom Gainsight domain, such as `companyapi.yourcompany.com`. It must equal the `domain` host. |
 | `start_date` | No | ISO 8601 date-time. The earliest modified date for incremental streams on their first run. |
@@ -129,6 +138,45 @@ Example `config.json`:
   "start_date": "2024-01-01T00:00:00Z"
 }
 ```
+
+### Authentication
+
+Set exactly one method. Any other combination fails config validation
+before any request.
+
+- **Access key:** `access_key`. Gainsight makes a connector IP allowlist
+  mandatory for this method. Hotglue jobs call from changing IP addresses,
+  so a tenant that enforces the list refuses them with `GS_APIG_2402`.
+- **M2M OAuth:** `client_id` and `client_secret`. The IP allowlist is
+  optional for this method, so use it when the caller's IP address changes.
+  M2M OAuth cannot call Gainsight's Event APIs. The tap does not use them.
+
+To create M2M OAuth credentials, a Gainsight super admin opens
+Administration > Connectors 2.0, creates a Gainsight API connection, selects
+the OAuth authentication type, and clicks Generate OAuth Credentials.
+
+```json
+{
+  "client_id": "YOUR_OAUTH_API_KEY",
+  "client_secret": "YOUR_OAUTH_API_SECRET",
+  "domain": "acme.gainsightcloud.com"
+}
+```
+
+With M2M OAuth, the tap works like this:
+
+1. Before its first API call, it sends `POST /v1/users/m2m/oauth/token`
+   with `Authorization: Basic base64(client_id:client_secret)` and the form
+   body `grant_type=client_credentials`.
+1. It sends the `access_token` from the reply as `Authorization: Bearer`
+   on every API call.
+1. It keeps the token in memory for the run, never on disk, in logs or in
+   state. It fetches a new token when the current one is within 5 minutes of
+   its `expires_in`.
+1. On a 401 from an API call, it fetches a new token and retries that call
+   once. A second 401 fails the call.
+1. A token request that fails with 400, 401 or 403 fails the run with an
+   error that says the OAuth API Key or Secret was not accepted.
 
 ## Streams
 
@@ -209,7 +257,8 @@ setting.
 
 ## How discovery works
 
-Discovery runs with only `access_key` and `domain`. It makes these calls:
+Discovery runs with only the credentials and `domain`. With M2M OAuth, it
+first fetches a token. It then makes these calls:
 
 1. It lists objects with the Lite object list. Objects marked `readable: false`
    are skipped.
@@ -222,7 +271,11 @@ Discovery runs with only `access_key` and `domain`. It makes these calls:
 Failures:
 
 - An auth failure (HTTP 401 or 403, or error code `GS_APIG_2401` or
-  `GSOBJ_1024`) raises at once. So does any redirect.
+  `GSOBJ_1024`) raises at once. So does any redirect. With M2M OAuth, a 401
+  first gets one new token and one retry.
+- Error code `GS_APIG_2402` means the connection allows only listed IP
+  addresses. It raises at once with its own message, which suggests M2M
+  OAuth.
 - A failure on `Company` raises.
 - If a describe batch fails, the tap retries each object alone. An optional
   object that still fails logs a warning and is dropped.
@@ -324,7 +377,7 @@ SDK doesn't, so the tap applies it.
 - **Retries.** HTTP 429, 5xx, connection errors and timeouts back off
   exponentially, up to 8 tries and 60 seconds a wait. The stream then fails.
 - **Redirects.** The tap never follows a redirect, because `requests` would
-  resend the `AccessKey` header to the new host. A 3xx fails with the host it
+  resend the credential headers to the new host. A 3xx fails with the host it
   pointed to.
 - **Errors.** Any other 4xx fails the stream at once. So does a 200 whose
   body has `result: false`, a body that is not JSON, or a `data` shape the
@@ -350,6 +403,7 @@ code has a comment with its doc link.
 | CTAs | `POST /v2/cockpit/cta/list` | [Call To Action (CTA) API](https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Cockpit_API/Call_To_Action_(CTA)_API_Documentation), Fetch CTA API |
 | Deleted CTAs | `POST /v2/cockpit/cta/deleted/list` | [Retrieve Deleted Data API](https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Cockpit_API/Retrieve_Deleted_Data_API), CTA, Endpoint One |
 | Deleted records | `POST /v1/data/objects/query/record_delete_log` and `.../record_delete_log_high_volume` | [Data Management APIs](https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Data_Management_APIs/Data_Management_APIs), Retrieve Deleted Data API |
+| M2M OAuth token | `POST /v1/users/m2m/oauth/token` | [Generate REST API Key](https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Generate_REST_API/Generate_REST_API_Key), Get Access Token API |
 
 Other facts and where they come from:
 
@@ -362,6 +416,9 @@ Other facts and where they come from:
 | Query dates return as epoch milliseconds | Custom Object API, Sample Success Response notes |
 | Empty results: `data.records: []`, `result: false` with "No data found", and GSOBJ_1011 at HTTP 400 | Custom Object API and Company API, Read API failure samples. [Error Codes](https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Company_and_Relationship_API/Error_Codes_for_Company%2C_Relationship%2C_and_Custom_Object_APIs) |
 | Auth error codes `GS_APIG_2401` and `GSOBJ_1024` | Data Management APIs failure samples. Error Codes |
+| Token request header `Authorization: Basic base64(client_id:client_secret)`, reply `access_token`, `token_type` and `expires_in` (86400) | Generate REST API Key, Headers and Get Access Token API |
+| Token request body `grant_type=client_credentials` as form data | RFC 6749 section 4.4, which Get Access Token API links. The Gainsight page shows no body. |
+| `GS_APIG_2402` "IP Address does not lie in range of whitelisted ips" | A live tenant's reply. No Gainsight doc page lists it. |
 | "Requested object not found" (`OBJECT_NOT_FOUND`) | Data Management APIs, Get Describe OMD failure sample |
 | DateTime format `yyyy-MM-dd'T'HH:mm:ss.SSSZ` | Timeline APIs, custom field Data Type table |
 | CTA fields, `fieldName` conditions, `pageSize`, `pageNumber`, at most 1000 a page | Call To Action (CTA) API, Fetch CTA API |
@@ -371,6 +428,11 @@ Other facts and where they come from:
 ## Known gaps and unverified behavior
 
 Check these against a live tenant before release, roughly in this order:
+
+- **M2M OAuth token body.** Gainsight's page shows the token path, the
+  `Basic` header and the reply, but no request body. The tap sends
+  `grant_type=client_credentials` as form data, from RFC 6749 section 4.4,
+  which the page links. Confirm a live token request succeeds.
 
 - **Three-term AND.** The docs show `A AND B`. The drain step sends
   `A AND B AND C`. That is the one extension beyond the documented form.

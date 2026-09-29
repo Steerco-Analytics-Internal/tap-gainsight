@@ -47,12 +47,27 @@ DESCRIBE_BODY_KEYS = frozenset(
 # Keys that carry data to write. They must not appear anywhere in a body.
 WRITE_KEYS = frozenset({"records", "data", "lookups", "updateKeys"})
 
+# Docs: "Generate REST API Key", "Get Access Token API". The docs show no
+# body and link RFC 6749 section 4.4, the client credentials grant. Its one
+# required form field is grant_type=client_credentials.
+TOKEN_PATH = "/v1/users/m2m/oauth/token"
+TOKEN_BODY = {"grant_type": "client_credentials"}
+
+# Authorization values, by request. The token request sends Basic
+# base64(client_id:client_secret). Every other request may send only a
+# Bearer token, in the RFC 6750 b64token form.
+BASIC_AUTHORIZATION = re.compile(r"Basic [A-Za-z0-9+/]+={0,2}")
+BEARER_TOKEN = re.compile(r"[A-Za-z0-9._~+/-]+=*")
+BEARER_AUTHORIZATION = re.compile(rf"Bearer {BEARER_TOKEN.pattern}")
+
 
 class AllowedRequest(t.NamedTuple):
     method: str
     path: str  # An anchored regular expression.
     query_keys: t.FrozenSet[str]
     body_keys: t.FrozenSet[str]
+    # "json" for a JSON object body, "form" for form data.
+    body_format: str = "json"
 
 
 # The only requests the tap may send. Each is a documented read endpoint.
@@ -69,14 +84,26 @@ READ_ONLY_ALLOWLIST: t.Tuple[AllowedRequest, ...] = (
     AllowedRequest("POST", r"^/v2/cockpit/cta/list$", frozenset(), CTA_BODY_KEYS),
     # Retrieve Deleted Data API, CTA, "Endpoint One".
     AllowedRequest("POST", r"^/v2/cockpit/cta/deleted/list$", frozenset(), CTA_BODY_KEYS),
+    # Generate REST API Key, "Get Access Token API", for M2M OAuth. It reads
+    # a token and changes no tenant data.
+    AllowedRequest("POST", rf"^{re.escape(TOKEN_PATH)}$", frozenset(), frozenset(TOKEN_BODY), "form"),
 )
 
 
 # The request header names the tap sends, lowercase. requests adds the
-# last four. Anything else, such as X-HTTP-Method-Override or
-# Authorization, is refused.
+# last four. Anything else, such as X-HTTP-Method-Override, is refused.
+# check_authorization limits the Authorization value per request.
 ALLOWED_HEADERS = frozenset(
-    {"accesskey", "content-type", "content-length", "user-agent", "accept", "accept-encoding", "connection"}
+    {
+        "accesskey",
+        "authorization",
+        "content-type",
+        "content-length",
+        "user-agent",
+        "accept",
+        "accept-encoding",
+        "connection",
+    }
 )
 
 
@@ -143,6 +170,9 @@ def check_request(method: str, url: str, body: t.Optional[bytes | str]) -> None:
         if body:
             raise GainsightSafetyError(f"Refused GET {path}: a GET must have no body.")
         return
+    if rule.body_format == "form":
+        _check_form_body(method, path, body)
+        return
     try:
         payload = json.loads(body) if body else None
     except ValueError as exc:
@@ -158,6 +188,20 @@ def check_request(method: str, url: str, body: t.Optional[bytes | str]) -> None:
     if written:
         raise GainsightSafetyError(
             f"Refused {method} {path}: the body carries write keys {sorted(written)}."
+        )
+
+
+def _check_form_body(method: str, path: str, body: t.Optional[bytes | str]) -> None:
+    """Raise unless the body is exactly the token request's form data."""
+    text = body.decode("utf-8", "replace") if isinstance(body, bytes) else (body or "")
+    try:
+        form = parse_qs(text, keep_blank_values=True, strict_parsing=True)
+    except ValueError as exc:
+        raise GainsightSafetyError(f"Refused {method} {path}: the body is not form data.") from exc
+    if form != {key: [value] for key, value in TOKEN_BODY.items()}:
+        raise GainsightSafetyError(
+            f"Refused {method} {path}: the body must be exactly the fields {sorted(TOKEN_BODY)} "
+            "with their documented values."
         )
 
 
@@ -183,6 +227,40 @@ def check_headers(headers: t.Mapping[str, str]) -> None:
         raise GainsightSafetyError(f"Refused headers {extra}: not on the tap's header allowlist.")
 
 
+def _is_token_request(method: str, url: str) -> bool:
+    return (method or "").upper() == "POST" and urlsplit(url).path == TOKEN_PATH
+
+
+def check_authorization(method: str, url: str, headers: t.Mapping[str, str]) -> None:
+    """Raise unless the credential headers fit the request.
+
+    The token request must carry Basic authorization and no AccessKey.
+    Every other request may carry Bearer authorization or AccessKey, never
+    both, and never another Authorization scheme. Values are not echoed.
+    """
+    names = {name.lower(): value for name, value in headers.items()}
+    authorization = names.get("authorization")
+    path = urlsplit(url).path
+    if _is_token_request(method, url):
+        if authorization is None or not BASIC_AUTHORIZATION.fullmatch(authorization):
+            raise GainsightSafetyError(
+                f"Refused POST {path}: the header allowlist requires Basic authorization on the token request."
+            )
+        if "accesskey" in names:
+            raise GainsightSafetyError(f"Refused POST {path}: the token request must not carry AccessKey.")
+        return
+    if authorization is None:
+        return
+    if not BEARER_AUTHORIZATION.fullmatch(authorization):
+        raise GainsightSafetyError(
+            f"Refused {(method or '').upper()} {path}: the header allowlist permits only Bearer authorization here."
+        )
+    if "accesskey" in names:
+        raise GainsightSafetyError(
+            f"Refused {(method or '').upper()} {path}: send AccessKey or Authorization, not both."
+        )
+
+
 def send(
     session: requests.Session,
     prepared: requests.PreparedRequest,
@@ -196,9 +274,9 @@ def send(
 
     The checks: the session ignores the environment (no .netrc or proxy
     settings), the URL is https to the pinned host, the headers are on the
-    header allowlist, and the method, path and body are an allowed read.
-    Redirects are never followed: requests would resend the AccessKey header
-    to the new host.
+    header allowlist, the Authorization form fits the request, and the
+    method, path and body are an allowed read. Redirects are never
+    followed: requests would resend the credential headers to the new host.
     """
     if session.trust_env:
         raise GainsightSafetyError(
@@ -206,6 +284,7 @@ def send(
         )
     check_destination(prepared.url or "", pinned_host)
     check_headers(prepared.headers or {})
+    check_authorization(prepared.method or "", prepared.url or "", prepared.headers or {})
     check_request(prepared.method or "", prepared.url or "", prepared.body)
     if budget is not None:
         budget.spend()

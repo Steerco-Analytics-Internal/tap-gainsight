@@ -24,6 +24,16 @@ FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 BASE_URL = "https://acme.gainsightcloud.com"
 ACCESS_KEY = "test-access-key"
 CONFIG = {"access_key": ACCESS_KEY, "domain": "acme.gainsightcloud.com"}
+# M2M OAuth: the "OAuth API Key" and "OAuth API Secret" from Connectors 2.0.
+CLIENT_ID = "test-oauth-api-key"
+CLIENT_SECRET = "test-oauth-api-secret"
+OAUTH_CONFIG = {"client_id": CLIENT_ID, "client_secret": CLIENT_SECRET, "domain": "acme.gainsightcloud.com"}
+TOKEN_URL = f"{BASE_URL}/v1/users/m2m/oauth/token"
+
+
+def token_response(token: str = "token-1", expires_in: t.Any = 86400) -> dict:
+    """A token reply in the documented "Get Access Token API" sample shape."""
+    return {"access_token": token, "token_type": "Bearer", "expires_in": expires_in}
 
 
 def load(name: str) -> t.Any:
@@ -424,6 +434,20 @@ def make_tap(**config: t.Any) -> t.Any:
     catalog = config.pop("catalog", None)
     return TapGainsight(
         config={**CONFIG, **config},
+        state=state,
+        catalog=catalog,
+        parse_env_config=False,
+    )
+
+
+def make_oauth_tap(**config: t.Any) -> t.Any:
+    """make_tap, with M2M OAuth credentials in place of the access key."""
+    from tap_gainsight.tap import TapGainsight
+
+    state = config.pop("state", None)
+    catalog = config.pop("catalog", None)
+    return TapGainsight(
+        config={**OAUTH_CONFIG, **config},
         state=state,
         catalog=catalog,
         parse_env_config=False,
