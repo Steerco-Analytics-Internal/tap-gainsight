@@ -15,9 +15,11 @@ from tap_gainsight.client import (
     GainsightMetadataClient,
     DEFAULT_REQUESTS_PER_MINUTE,
     RATE_LIMIT_CALLS,
+    RECORD_LIMITS_SETTING,
     RateLimiter,
     load_zone,
     pinned_host,
+    record_limits,
 )
 from tap_gainsight.safety import RequestBudget
 from tap_gainsight.streams import (
@@ -130,6 +132,19 @@ class TapGainsight(Tap):
                 "Company and these objects get a stream."
             ),
         ),
+        th.Property(
+            RECORD_LIMITS_SETTING,
+            th.CustomType(
+                {
+                    "type": ["object", "null"],
+                    "additionalProperties": {"type": "integer", "minimum": 1},
+                }
+            ),
+            description=(
+                "Set by Hotglue, not by users. The most records to write for "
+                "each named stream, as in a field-sample job."
+            ),
+        ),
     ).to_dict()
 
     _rate_limiter: t.Optional[RateLimiter] = None
@@ -171,6 +186,10 @@ class TapGainsight(Tap):
                 f"max_requests_per_minute must be from 1 to {RATE_LIMIT_CALLS}, "
                 f"got {rate!r}. It can only lower the documented limit."
             )
+        try:
+            record_limits(self.config)
+        except ValueError as exc:
+            problems.append(str(exc))
         cap = self.config.get("max_requests")
         if cap is not None and not (isinstance(cap, int) and cap >= 1):
             problems.append(f"max_requests must be 1 or more, got {cap!r}.")
