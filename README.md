@@ -486,10 +486,13 @@ Check these against a live tenant before release, roughly in this order:
   as `Company`, and the listed name for the rest. If the query API is
   case-sensitive in another way, discovery works but those queries fail.
 - **Picklist metadata.** No describe sample in the docs shows a picklist field.
-  The tap reads labels from any list under a describe key containing
-  "picklist" whose items have `gsid`. That is the dropdown API's item shape.
-  Otherwise it reads a `categoryId` and calls the dropdown API. If a live
-  describe uses another shape, picklists get no label column. Ids still sync.
+  A live describe, recorded 2026-09-30, lists the items under `options` as
+  `value` (the item GSID) and `label`, inactive items included. It keeps the
+  category id in `meta.properties.PICKLIST_CATEGORY_ID`. The tap reads that
+  shape first. It also reads a list under a describe key containing
+  "picklist" whose items have `gsid`, and a `categoryId`. A field with no
+  items calls the dropdown API with its category id. If a describe uses
+  another shape, the picklist gets no label column. Ids still sync.
 - **Deleted flags.** A field-level `deleted` flag is inferred from the
   lookup detail's `deleted` key in the describe sample. Hidden fields are
   kept, because hiding changes the UI, not the data.

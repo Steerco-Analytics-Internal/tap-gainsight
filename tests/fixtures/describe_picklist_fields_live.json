@@ -1,0 +1,176 @@
+[
+  {
+    "fieldName": "CompanyType",
+    "label": "Company Type",
+    "dataType": "PICKLIST",
+    "objectName": "company",
+    "options": [
+      {
+        "active": true,
+        "defaultValue": false,
+        "label": "Customer",
+        "validFor": null,
+        "value": "1I00ITEMCUSTOMER00000000000000000000",
+        "displayOrder": 1,
+        "group": null,
+        "groupId": "1I00CATEGORYCOMPANYTYPE0000000000000",
+        "color": null,
+        "controllerValues": null,
+        "description": "",
+        "systemName": "Customer"
+      },
+      {
+        "active": true,
+        "defaultValue": false,
+        "label": "Former Customer",
+        "validFor": null,
+        "value": "1I00ITEMFORMERCUSTOMER00000000000000",
+        "displayOrder": 2,
+        "group": null,
+        "groupId": "1I00CATEGORYCOMPANYTYPE0000000000000",
+        "color": null,
+        "controllerValues": null,
+        "description": "",
+        "systemName": "Former Customer"
+      },
+      {
+        "active": false,
+        "defaultValue": false,
+        "label": "Prospect",
+        "validFor": null,
+        "value": "1I00ITEMPROSPECT00000000000000000000",
+        "displayOrder": 3,
+        "group": null,
+        "groupId": "1I00CATEGORYCOMPANYTYPE0000000000000",
+        "color": null,
+        "controllerValues": null,
+        "description": "",
+        "systemName": "Prospect"
+      }
+    ],
+    "meta": {
+      "properties": {
+        "PICKLIST_CATEGORY": "Company Type",
+        "PICKLIST_CATEGORY_ID": "1I00CATEGORYCOMPANYTYPE0000000000000",
+        "sourceType": "PICKLIST"
+      },
+      "filterable": true,
+      "sortable": true,
+      "groupable": true,
+      "createable": true,
+      "updateable": true,
+      "formulaField": false,
+      "hasLookup": false,
+      "required": false,
+      "richText": false,
+      "nillable": true,
+      "readOnly": false,
+      "dependentPicklist": false,
+      "fieldGroupType": "STANDARD",
+      "selfLookup": false,
+      "indexed": false,
+      "decimalPlaces": 0,
+      "length": 255,
+      "hidden": false,
+      "nameField": false,
+      "aggregatable": true
+    }
+  },
+  {
+    "fieldName": "SubSegment_multi_select__gc",
+    "label": "Sub-Segment (multi select)",
+    "dataType": "MULTISELECTDROPDOWNLIST",
+    "objectName": "company",
+    "options": [
+      {
+        "active": true,
+        "defaultValue": false,
+        "label": "Generics",
+        "validFor": null,
+        "value": "1I00ITEMGENERICS00000000000000000000",
+        "displayOrder": 1,
+        "group": null,
+        "groupId": "1I00CATEGORYSUBSEGMENT00000000000000",
+        "color": null,
+        "controllerValues": null,
+        "description": "",
+        "systemName": "Generics"
+      },
+      {
+        "active": true,
+        "defaultValue": false,
+        "label": "Specialty",
+        "validFor": null,
+        "value": "1I00ITEMSPECIALTY0000000000000000000",
+        "displayOrder": 2,
+        "group": null,
+        "groupId": "1I00CATEGORYSUBSEGMENT00000000000000",
+        "color": null,
+        "controllerValues": null,
+        "description": "",
+        "systemName": "Specialty"
+      }
+    ],
+    "meta": {
+      "properties": {
+        "PICKLIST_CATEGORY": "Sub Segment",
+        "PICKLIST_CATEGORY_ID": "1I00CATEGORYSUBSEGMENT00000000000000",
+        "sourceType": "MULTISELECTDROPDOWNLIST"
+      },
+      "filterable": true,
+      "sortable": false,
+      "groupable": false,
+      "createable": true,
+      "updateable": true,
+      "formulaField": false,
+      "hasLookup": false,
+      "required": false,
+      "richText": false,
+      "nillable": true,
+      "readOnly": false,
+      "dependentPicklist": false,
+      "fieldGroupType": "CUSTOM",
+      "selfLookup": false,
+      "indexed": false,
+      "decimalPlaces": 0,
+      "length": 500,
+      "hidden": false,
+      "nameField": false,
+      "aggregatable": true
+    }
+  },
+  {
+    "fieldName": "Tags",
+    "label": "Tags",
+    "dataType": "MULTISELECTDROPDOWNLIST",
+    "objectName": "company",
+    "options": [],
+    "meta": {
+      "properties": {
+        "PICKLIST_CATEGORY": "Company Tags",
+        "PICKLIST_CATEGORY_ID": "1I00CATEGORYCOMPANYTAGS0000000000000",
+        "sourceType": "MULTISELECTDROPDOWNLIST"
+      },
+      "filterable": true,
+      "sortable": false,
+      "groupable": false,
+      "createable": true,
+      "updateable": true,
+      "formulaField": false,
+      "hasLookup": false,
+      "required": false,
+      "richText": false,
+      "nillable": true,
+      "readOnly": false,
+      "dependentPicklist": false,
+      "fieldGroupType": "STANDARD",
+      "selfLookup": false,
+      "indexed": false,
+      "decimalPlaces": 0,
+      "length": 255,
+      "hidden": false,
+      "nameField": false,
+      "aggregatable": true
+    }
+  }
+]
