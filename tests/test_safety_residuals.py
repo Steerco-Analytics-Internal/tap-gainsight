@@ -157,10 +157,17 @@ def test_the_summary_shape():
 # 3. No trailing newline sneaks past a regex.
 
 
-# "acme\n" was already rejected, because the suffix lands after the newline.
-# It stays as a guard.
+# A pasted address can end in a line break. It is dropped before any check,
+# so the host the tap calls never carries it.
 @pytest.mark.parametrize("domain", ["acme.gainsightcloud.com\n", "https://acme.gainsightcloud.com\n", "acme\n"])
-def test_a_trailing_newline_in_the_domain_is_rejected(domain):
+def test_a_trailing_newline_in_the_domain_is_dropped(domain):
+    from tap_gainsight.client import pinned_host
+
+    assert pinned_host(domain) == "acme.gainsightcloud.com"
+
+
+@pytest.mark.parametrize("domain", ["acme.gainsightcloud.com\nevil.com", "acme\n.gainsightcloud.com"])
+def test_an_inner_newline_in_the_domain_is_rejected(domain):
     from tap_gainsight.client import pinned_host
 
     with pytest.raises(ValueError):

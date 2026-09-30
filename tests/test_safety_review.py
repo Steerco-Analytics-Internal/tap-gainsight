@@ -31,10 +31,10 @@ BAD_DOMAINS = [
     "acme.gainsightcloud.com#@evil.com",
     "acme.gainsightcloud.com\\@evil.com",
     "acme.gainsightcloud.com?x=1",
-    " acme.gainsightcloud.com",
+    "acme.gainsightcloud.com\u200b",
     "acme .gainsightcloud.com",
     "ftp://acme.gainsightcloud.com",
-    "https://acme.gainsightcloud.com/",
+    "https://acme.gainsightcloud.com/some/path",
 ]
 PINNED = "acme.gainsightcloud.com"
 

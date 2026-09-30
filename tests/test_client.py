@@ -29,6 +29,12 @@ from tests.conftest import ACCESS_KEY, BASE_URL, CONFIG, load
         ("HTTPS://ACME.GainsightCloud.com", "https://acme.gainsightcloud.com"),
         ("acme", "https://acme.gainsightcloud.com"),
         ("eu.acme.gainsightcloud.com", "https://eu.acme.gainsightcloud.com"),
+        ("  acme.gainsightcloud.com  ", "https://acme.gainsightcloud.com"),
+        ("\tacme.gainsightcloud.com\r\n", "https://acme.gainsightcloud.com"),
+        ("acme.gainsightcloud.com\u00a0", "https://acme.gainsightcloud.com"),
+        ("https://acme.gainsightcloud.com/", "https://acme.gainsightcloud.com"),
+        ("acme.gainsightcloud.com//", "https://acme.gainsightcloud.com"),
+        (" https://acme.gainsightcloud.com/ ", "https://acme.gainsightcloud.com"),
     ],
 )
 def test_normalize_domain(value, expected):
@@ -37,7 +43,18 @@ def test_normalize_domain(value, expected):
 
 @pytest.mark.parametrize(
     "value",
-    ["", "   ", "https://", "https://acme.gainsightcloud.com/", "  acme.gainsightcloud.com  ", "http://acme.gainsightcloud.com"],
+    [
+        "",
+        "   ",
+        "/",
+        "https://",
+        "https:///",
+        "http://acme.gainsightcloud.com",
+        "acme .gainsightcloud.com",
+        "acme.gainsightcloud.com /",
+        "https://acme.gainsightcloud.com/v1/ui/home",
+        "acme.gainsightcloud.com\u200b",
+    ],
 )
 def test_normalize_domain_rejects_empty(value):
     with pytest.raises(ValueError):

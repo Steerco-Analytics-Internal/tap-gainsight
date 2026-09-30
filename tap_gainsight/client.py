@@ -189,19 +189,25 @@ _LABEL = r"[a-z0-9-]+"
 GAINSIGHT_HOST = re.compile(rf"^{_LABEL}(\.{_LABEL})*\.gainsightcloud\.com$")
 CUSTOM_HOST = re.compile(rf"^{_LABEL}(\.{_LABEL})*\.[a-z][a-z0-9-]*$")
 _BARE_HOST_CHARS = re.compile(r"^[A-Za-z0-9.-]+$")
+# Whitespace a paste can carry around the address. Steerco's connection
+# check strips the same set, so both read a pasted address the same way.
+_PASTE_WHITESPACE = " \t\n\r\f\v\u00a0"
 
 
 def pinned_host(domain: str, custom_domain: t.Optional[str] = None) -> str:
     """Return the one host the tap may call. Raise ValueError otherwise.
 
-    `domain` is a bare host, optionally after `https://`. A single label,
-    such as `acme`, becomes `acme.gainsightcloud.com`. The host must be a
-    subdomain of gainsightcloud.com, or equal `custom_domain`, so a custom
-    host is a deliberate, double-entered choice. User information, ports,
-    paths, queries, fragments, braces and whitespace are refused.
+    `domain` is a bare host, optionally after `https://`. Whitespace around
+    it and slashes after it are dropped, as a pasted address carries them.
+    A single label, such as `acme`, becomes `acme.gainsightcloud.com`. The
+    host must be a subdomain of gainsightcloud.com, or equal `custom_domain`,
+    so a custom host is a deliberate, double-entered choice. User
+    information, ports, paths, queries, fragments, braces and inner
+    whitespace are refused.
     """
-    raw = domain if isinstance(domain, str) else ""
+    raw = domain.strip(_PASTE_WHITESPACE) if isinstance(domain, str) else ""
     host = raw[len("https://"):] if raw.lower().startswith("https://") else raw
+    host = host.rstrip("/")
     if not host or not _BARE_HOST_CHARS.fullmatch(host):
         raise ValueError(
             f"The `domain` setting {domain!r} is not a bare host. Use a host such "
