@@ -341,10 +341,10 @@ def test_n7_delete_log_check_orders_by_deleted_on(api):
 # Guards: these passed before the fixes and must keep passing.
 
 
-def test_guard_a_transient_dropdown_failure_for_a_selected_label_raises(api):
+def test_guard_a_transient_dropdown_failure_for_a_selected_picklist_raises(api):
     catalog = catalog_selecting(make_tap(), {"Company"})
     api.dropdown = {"result": False, "errorDesc": "gone"}
-    with pytest.raises(Exception, match="Company.License_Type__gc_label"):
+    with pytest.raises(Exception, match=r"Company\.License_Type__gc\b"):
         make_tap(catalog=catalog).streams
 
 

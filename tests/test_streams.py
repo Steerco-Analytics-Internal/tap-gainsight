@@ -383,16 +383,17 @@ def test_mda_nulls_missing_fields_dates_labels_and_lookups(api):
     record = got[full["Gsid"]]
     assert record["ModifiedDate"] == "2024-02-05T08:24:36.253000+00:00"
     assert record["Renewal_Date"] == "2018-03-22T18:23:38.667000+00:00"
-    assert record["Stage_label"] == "Kicked Off"
-    assert record["License_Type__gc_label"] == "External"
+    assert record["Stage"] == "Kicked Off"
+    assert record["License_Type__gc"] == "External"
     assert record["Csm__gr.Email"] == "jnash@heroku.com"
 
     assert got["1P02COMPANYNULL"]["Name"] is None
-    assert got["1P02COMPANYNULL"]["Stage_label"] is None
-    assert got["1P02COMPANYMISS"]["Stage_label"] is None
+    assert got["1P02COMPANYNULL"]["Stage"] is None
+    assert "Stage" not in got["1P02COMPANYMISS"]
     assert "Name" not in got["1P02COMPANYMISS"]
-    assert got["1P02COMPANYMULT"]["Stage_label"] == '["Kicked Off", "Launched"]'
-    assert got["1P02COMPANYSEMI"]["Stage_label"] == '["Kicked Off", null]'
+    assert got["1P02COMPANYMULT"]["Stage"] == '["Kicked Off", "Launched"]'
+    # An id with no item stays as the id.
+    assert got["1P02COMPANYSEMI"]["Stage"] == '["Kicked Off", "unknown"]'
     assert got["1P02COMPANYNODT"]["ModifiedDate"] is None
 
 
@@ -608,17 +609,16 @@ def catalog_with(tap, stream_name, deselect=()):
 def test_select_list_follows_the_catalog(api, capsys):
     row = {**company_row(1), "Stage": "1I0054U9FAKXZ0H26HO92M3F1G5SPWVQDNF3", "Health_Notes__gc": "ok"}
     engine = serve(api, SPECS["Company"], [row])
-    catalog = catalog_with(make_tap(), "Company", deselect={"Health_Notes__gc", "Stage", "Csm__gr.Email"})
+    catalog = catalog_with(make_tap(), "Company", deselect={"Health_Notes__gc", "Csm__gr.Email"})
     tap = make_tap(catalog=catalog)
     select = tap.streams["Company"].select_paths()
     assert "Health_Notes__gc" not in select and "Csm__gr.Email" not in select
-    # The label is still selected, so its id field is selected for the query.
     assert "Stage" in select and "Csm__gr.Name" in select
     tap.sync_all()
     assert engine.bodies[0]["select"] == select
     record = next(m["record"] for m in messages(capsys) if m["type"] == "RECORD")
-    assert "Health_Notes__gc" not in record and "Stage" not in record
-    assert record["Stage_label"] == "Kicked Off"
+    assert "Health_Notes__gc" not in record
+    assert record["Stage"] == "Kicked Off"
 
 
 def test_keys_are_selected_even_when_deselected(api):
@@ -627,8 +627,8 @@ def test_keys_are_selected_even_when_deselected(api):
     assert "Gsid" in select and "ModifiedDate" in select
 
 
-def test_deselected_label_does_not_add_its_id(api):
-    catalog = catalog_with(make_tap(), "Company", deselect={"Stage", "Stage_label"})
+def test_a_deselected_picklist_is_not_queried(api):
+    catalog = catalog_with(make_tap(), "Company", deselect={"Stage"})
     assert "Stage" not in make_tap(catalog=catalog).streams["Company"].select_paths()
 
 
@@ -641,7 +641,7 @@ def test_cta_select_follows_the_catalog(api):
     assert "ModifiedDate" in select and "customDate__gc" in select
 
 
-def test_a_deselected_column_that_discovery_drops_is_fine(api):
-    catalog = catalog_with(make_tap(), "Company", deselect={"License_Type__gc_label"})
+def test_a_deselected_picklist_whose_names_fail_is_fine(api):
+    catalog = catalog_with(make_tap(), "Company", deselect={"License_Type__gc"})
     api.dropdown = {"result": False, "errorDesc": "gone"}
     assert "Company" in make_tap(catalog=catalog).streams

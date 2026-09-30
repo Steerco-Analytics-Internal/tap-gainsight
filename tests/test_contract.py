@@ -167,7 +167,7 @@ def test_company_select_includes_lookup_paths(api):
     list(make_tap().streams["Company"].get_records(None))
     select = engine.bodies[0]["select"]
     assert {"Csm__gr.Name", "Csm__gr.Email", "CreatedBy__gr.Name", "Health_Notes__gc"} <= set(select)
-    assert not any(name.endswith("_label") for name in select)
+    assert {"Stage", "License_Type__gc"} <= set(select)
 
 
 @pytest.mark.parametrize(

@@ -239,14 +239,17 @@ other object uses its listed name.
   selects `<lookup>__gr.Name`. They are flat columns named with the documented
   dot path, for example `Csm__gr.Email`. A column is added only when the
   target object's describe has the field.
-- **Picklists.** Picklist fields return item GSIDs. The tap adds a
-  `<field>_label` column with the item name next to the id. A multi-select
-  value becomes a JSON list of names as text, such as
-  `["Kicked Off", "Launched"]`. See [Known gaps](#known-gaps-and-unverified-behavior).
+- **Picklists.** The query API returns item GSIDs for picklist and
+  multi-select fields. The tap sends the item names in the field itself, as
+  Gainsight's own screens show them: `CompanyType` is `Customer`. A
+  multi-select value becomes a JSON list of names as text, such as
+  `["Kicked Off", "Launched"]`. An id with no item, such as a deleted item,
+  stays as the id. A field with no items, such as an unused `Tags`, keeps
+  its ids. See [Known gaps](#known-gaps-and-unverified-behavior).
 - **Unmapped types.** A field whose `dataType` the tap does not map is a
   nullable string. A value that is not a string is JSON-encoded, so a list
   stays readable. At the start of a run, each stream logs its unmapped types
-  with a count. A field is never typed as a list of JSON types: the SDK turns
+  with a count. A picklist with item names is mapped, so it is not listed. A field is never typed as a list of JSON types: the SDK turns
   every value of a field that allows `boolean` into true or false, and
   Hotglue's parquet target fails on it. A connection discovered before
   v1.1.1 needs discovery again. The SDK sends the input catalog's schema, so
@@ -313,7 +316,9 @@ Failures:
 - A failure on `Company` raises.
 - If a describe batch fails, the tap retries each object alone. An optional
   object that still fails logs a warning and is dropped.
-- A failed dropdown call logs a warning. That picklist gets no label column.
+- A failed dropdown call logs a warning. That picklist keeps its item GSIDs.
+  If the catalog selects the field, the run fails instead, so a value never
+  switches between a name and an id from one run to the next.
 
 Every tap run discovers again, so new custom fields appear on the next run.
 When a run gets a catalog, the tap compares it with that discovery:
@@ -492,15 +497,16 @@ Check these against a live tenant before release, roughly in this order:
   shape first. It also reads a list under a describe key containing
   "picklist" whose items have `gsid`, and a `categoryId`. A field with no
   items calls the dropdown API with its category id. If a describe uses
-  another shape, the picklist gets no label column. Ids still sync.
+  another shape, the picklist keeps its item GSIDs.
 - **Deleted flags.** A field-level `deleted` flag is inferred from the
   lookup detail's `deleted` key in the describe sample. Hidden fields are
   kept, because hiding changes the UI, not the data.
 - **Deleted CTAs with a null `ModifiedDate`.** `cta_deleted` does not read
   them. The docs show no `IS_NULL` filter for that endpoint.
 - **Dropdown and multi-select type names.** The docs do not give their
-  describe `dataType` values. They are sent as text, like every unmapped
-  type. The run log names them.
+  describe `dataType` values. A live describe uses `PICKLIST` and
+  `MULTISELECTDROPDOWNLIST`. The tap finds picklists by their items, not by
+  these names.
 - **Response `data` shape.** The Company and CTA pages show `data` as a list.
   The Timeline and delete log pages show `data.records`. The tap accepts
   both.

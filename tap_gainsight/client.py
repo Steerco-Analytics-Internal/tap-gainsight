@@ -593,6 +593,22 @@ def to_text(value: t.Any) -> t.Optional[str]:
     return json.dumps(value, ensure_ascii=False, default=str)
 
 
+def item_names(value: t.Any, items: t.Mapping[str, t.Any]) -> t.Any:
+    """Map a dropdown item GSID, or several, to item names.
+
+    A multi-select value is a list or a ";"-joined string, and becomes a
+    list. An id with no item, such as a deleted item, stays as the id.
+    """
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return [items.get(str(item), item) for item in value]
+    if isinstance(value, str) and ";" in value:
+        parts = [part.strip() for part in value.split(";")]
+        return [items.get(part, part) for part in parts]
+    return items.get(str(value), value)
+
+
 def is_date_type(data_type: t.Optional[str]) -> bool:
     """Return True for Gainsight DATE and DATETIME fields."""
     kind = (data_type or "").upper()
@@ -1086,6 +1102,8 @@ class GainsightStream(RESTStream):
     date_fields: t.Set[str] = set()
     # Fields whose values become text. See to_text.
     text_fields: t.Set[str] = set()
+    # Dropdown field -> {item GSID: item name}. See item_names.
+    picklists: t.Dict[str, t.Mapping[str, t.Any]] = {}
 
     def __init__(self, *args: t.Any, **kwargs: t.Any) -> None:
         super().__init__(*args, **kwargs)
@@ -1250,6 +1268,10 @@ class GainsightStream(RESTStream):
     def post_process(
         self, row: dict, context: t.Optional[dict] = None
     ) -> t.Optional[dict]:
+        # Names come first, so a multi-select list then becomes text.
+        for field, items in self.picklists.items():
+            if field in row:
+                row[field] = item_names(row[field], items)
         for field in self.date_fields:
             if field in row:
                 row[field] = to_iso_datetime(row[field])
@@ -1268,12 +1290,13 @@ class GainsightStream(RESTStream):
         counts = collections.Counter(
             str(kind or "no type").upper() for kind in unknown_types.values()
         )
-        summary = ", ".join(f"{kind} ({count})" for kind, count in sorted(counts.items()))
+        summary = ", ".join(
+            f"{kind} ({count} field{'' if count == 1 else 's'})"
+            for kind, count in sorted(counts.items())
+        )
         self.logger.info(
-            "Stream %s sends %d fields as text because the tap does not map "
-            "their Gainsight types: %s.",
+            "Stream %s sends fields of unmapped Gainsight types as text: %s.",
             self.name,
-            len(unknown_types),
             summary,
         )
 

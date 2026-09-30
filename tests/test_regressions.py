@@ -295,7 +295,7 @@ def test_f8_a_selected_stream_that_discovery_drops_raises(api):
 def test_f8_a_selected_column_that_discovery_drops_raises(api):
     catalog = select_all(make_tap().catalog_dict, {"Company"})
     api.dropdown = {"result": False, "errorDesc": "gone"}
-    with pytest.raises(Exception, match="License_Type__gc_label"):
+    with pytest.raises(Exception, match=r"Company\.License_Type__gc\b"):
         make_tap(catalog=catalog).streams
 
 

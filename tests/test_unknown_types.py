@@ -53,25 +53,30 @@ def test_unknown_type_values_reach_the_output_as_text(api, tmp_path):
     got = {m["record"]["Gsid"]: m["record"] for m in messages if m["type"] == "RECORD"}
     records = [got[row["Gsid"]] for row in rows]
 
+    # Stage is a picklist, so known ids become names. Anything else is text.
     assert [record["Stage"] for record in records] == [
-        STAGE_ID,
-        json.dumps([STAGE_ID, OTHER_STAGE_ID]),
+        "Kicked Off",
+        '["Kicked Off", "Launched"]',
         "0",
         "true",
     ]
-    assert records[0]["Stage_label"] == "Kicked Off"
-    assert records[1]["Stage_label"] == '["Kicked Off", "Launched"]'
     assert records[0]["Is_Active__gc"] is False
     assert records[1]["Is_Active__gc"] is True
 
 
 def test_the_tap_logs_each_unknown_type_with_a_count(api, caplog):
+    api.describes["company"]["fields"] += [
+        doc_field("Name__gc", "company", fieldName="SfdcAccountId", dataType="SFDCID"),
+        doc_field("Name__gc", "company", fieldName="Logo", dataType="IMAGE"),
+        doc_field("Name__gc", "company", fieldName="Logo_Small", dataType="IMAGE"),
+    ]
     caplog.set_level(logging.INFO)
     logging.getLogger("tap-gainsight").addHandler(caplog.handler)
     make_tap().streams["Company"]
+    # Picklists with names are mapped, so they are not in the list.
     assert (
-        "Stream Company sends 2 fields as text because the tap does not map "
-        "their Gainsight types: PICKLIST (2)."
+        "Stream Company sends fields of unmapped Gainsight types as text: "
+        "IMAGE (2 fields), SFDCID (1 field)."
     ) in caplog.text
 
 

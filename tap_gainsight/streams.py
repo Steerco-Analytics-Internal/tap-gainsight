@@ -23,9 +23,6 @@ from tap_gainsight.client import (
 if t.TYPE_CHECKING:
     from singer_sdk import Tap
 
-# Suffix for the tap-made column that holds a picklist item's label.
-LABEL_SUFFIX = "_label"
-
 # Related fields to select through a lookup, by target object. Paths use the
 # documented dot notation: "csm__gr.email" (Company API Read sample) and
 # "OwnerId__gr.Email", "OwnerId__gr.Name", "CompanyId__gr.Name" (Fetch CTA
@@ -98,6 +95,22 @@ def picklist_category_id(field: dict) -> t.Optional[str]:
     return None
 
 
+def picklist_names(
+    field: dict, dropdowns: t.Mapping[str, t.Mapping[str, t.Any]]
+) -> t.Optional[t.Mapping[str, t.Any]]:
+    """Return {item GSID: item name} for a dropdown field, or None.
+
+    The items come from the describe, or else from `dropdowns`, the dropdown
+    API's answers by category id.
+    """
+    items = picklist_items(field)
+    if items is None:
+        category = picklist_category_id(field)
+        if category:
+            items = dropdowns.get(category)
+    return items or None
+
+
 def lookup_columns(
     field: dict, related_fields: t.Mapping[str, t.Set[str]]
 ) -> t.List[str]:
@@ -137,13 +150,13 @@ class ObjectPlan:
         self.properties: t.Dict[str, dict] = {}
         self.fields: t.Dict[str, dict] = {}
         self.date_fields: t.Set[str] = set()
-        # Fields sent as text: unknown types and label columns.
+        # Fields sent as text: unknown types and dropdown fields.
         self.text_fields: t.Set[str] = set()
         # Field name -> describe dataType, for each type the tap doesn't map.
         self.unknown_types: t.Dict[str, t.Any] = {}
         self.lookup_columns: t.List[str] = []
-        # label column -> (id field, {item GSID: label})
-        self.labels: t.Dict[str, t.Tuple[str, t.Mapping[str, t.Any]]] = {}
+        # Dropdown field -> {item GSID: item name}.
+        self.picklists: t.Dict[str, t.Mapping[str, t.Any]] = {}
 
         for field in fields:
             name = field.get("fieldName") if isinstance(field, dict) else None
@@ -157,24 +170,19 @@ class ObjectPlan:
             if not is_known_type(data_type):
                 self.text_fields.add(name)
                 self.unknown_types[name] = data_type
+            names = picklist_names(field, dropdowns)
+            if names:
+                # A dropdown field carries item names, not item GSIDs.
+                self.properties[name] = text_schema()
+                self.text_fields.add(name)
+                self.unknown_types.pop(name, None)
+                self.picklists[name] = names
 
         for name, field in list(self.fields.items()):
             for column in lookup_columns(field, related_fields):
                 if column not in self.properties:
                     self.properties[column] = {"type": ["null", "string"]}
                     self.lookup_columns.append(column)
-            items = picklist_items(field)
-            if items is None:
-                category = picklist_category_id(field)
-                if category:
-                    items = dropdowns.get(category)
-            if items:
-                label = f"{name}{LABEL_SUFFIX}"
-                if label not in self.properties:
-                    # A multi-select label is a list, sent as JSON text.
-                    self.properties[label] = text_schema()
-                    self.text_fields.add(label)
-                    self.labels[label] = (name, items)
 
     @property
     def schema(self) -> dict:
@@ -193,17 +201,6 @@ class ObjectPlan:
             return False
         meta = field.get("meta") if isinstance(field.get("meta"), dict) else {}
         return meta.get("sortable", True) is not False
-
-
-def resolve_label(value: t.Any, items: t.Mapping[str, t.Any]) -> t.Any:
-    """Map a picklist GSID, or a list of them, to labels."""
-    if value is None:
-        return None
-    if isinstance(value, list):
-        return [items.get(str(item)) for item in value]
-    if isinstance(value, str) and ";" in value:
-        return [items.get(part.strip()) for part in value.split(";")]
-    return items.get(str(value))
 
 
 class MDAObjectStream(SecondChainStream):
@@ -231,6 +228,7 @@ class MDAObjectStream(SecondChainStream):
         self.plan = plan
         self.date_fields = set(plan.date_fields)
         self.text_fields = set(plan.text_fields)
+        self.picklists = dict(plan.picklists)
         if replication_key_candidates is not None:
             self.replication_key_candidates = replication_key_candidates
         super().__init__(tap=tap, name=name or object_name, schema=plan.schema)
@@ -259,19 +257,9 @@ class MDAObjectStream(SecondChainStream):
     def select_paths(self) -> t.List[str]:
         """Return every selected field and lookup path, in schema order.
 
-        A selected label column pulls in its id field, because the label is
-        computed from the id. The SDK drops the id again if it is deselected.
         The key and tie-breaker are always selected, for paging.
         """
-        paths: t.List[str] = []
-        for name in self.plan.properties:
-            if name in self.plan.labels:
-                continue
-            if self.is_property_selected(name):
-                paths.append(name)
-        for label, (id_field, _) in self.plan.labels.items():
-            if self.is_property_selected(label) and id_field not in paths:
-                paths.append(id_field)
+        paths = [name for name in self.plan.properties if self.is_property_selected(name)]
         for required in (self.tiebreaker, self.replication_key):
             if required and required in self.plan.fields and required not in paths:
                 paths.append(required)
@@ -279,14 +267,6 @@ class MDAObjectStream(SecondChainStream):
 
     def base_payload(self) -> t.Dict[str, t.Any]:
         return {"select": self.select_paths()}
-
-    def post_process(
-        self, row: dict, context: t.Optional[dict] = None
-    ) -> t.Optional[dict]:
-        # Labels read the raw ids, before an id field becomes text.
-        for label, (id_field, items) in self.plan.labels.items():
-            row[label] = resolve_label(row.get(id_field), items)
-        return super().post_process(row, context) or row
 
 
 class DeletedRecordsStream(SecondChainStream):
@@ -599,25 +579,38 @@ class CtaStream(CtaSlicedStream):
     }
 
     def __init__(
-        self, tap: Tap, custom_fields: t.Optional[t.Iterable[dict]] = None
+        self,
+        tap: Tap,
+        custom_fields: t.Optional[t.Iterable[dict]] = None,
+        dropdowns: t.Optional[t.Mapping[str, t.Mapping[str, t.Any]]] = None,
     ) -> None:
         properties = dict(self.base_schema["properties"])
         self.select_map = dict(self.base_select)
+        # Custom field name -> describe field.
+        self.custom_fields: t.Dict[str, dict] = {}
         date_fields = set(type(self).date_fields)
         unknown_types: t.Dict[str, t.Any] = {}
+        picklists: t.Dict[str, t.Mapping[str, t.Any]] = {}
         for field in custom_fields or []:
             name = field.get("fieldName")
             if not name or name in properties or is_deleted_field(field):
                 continue
             data_type = field.get("dataType")
+            self.custom_fields[name] = field
             properties[name] = json_schema_for(data_type)
             self.select_map[name] = name
             if is_date_type(data_type):
                 date_fields.add(name)
             if not is_known_type(data_type):
                 unknown_types[name] = data_type
+            names = picklist_names(field, dropdowns or {})
+            if names:
+                properties[name] = text_schema()
+                unknown_types.pop(name, None)
+                picklists[name] = names
         self.date_fields = date_fields
-        self.text_fields = set(unknown_types)
+        self.text_fields = set(unknown_types) | set(picklists)
+        self.picklists = picklists
         super().__init__(
             tap=tap, schema={"type": "object", "properties": properties}
         )
