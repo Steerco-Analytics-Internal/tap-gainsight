@@ -19,6 +19,7 @@ import base64
 import collections
 import datetime
 import http.cookiejar
+import json
 import logging
 import math
 import re
@@ -100,14 +101,20 @@ RECORD_LIMITS_SETTING = "_hg_max_records_limit"
 
 # Gainsight data types with a known JSON shape. The docs name STRING, GSID,
 # DATETIME and LOOKUP as describe `dataType` values. The rest come from the
-# operator table in the Custom Object API page. Any other type accepts every
-# JSON type, because the docs do not show its value shape.
+# operator table in the Custom Object API page. Any other type is sent as
+# text, because the docs do not show its value shape.
 STRING_DATA_TYPES = {"STRING", "GSID", "EMAIL", "URL", "LOOKUP", "RICHTEXTAREA"}
 NUMBER_DATA_TYPES = {"NUMBER", "PERCENTAGE", "CURRENCY"}
 BOOLEAN_DATA_TYPES = {"BOOLEAN"}
 DATETIME_DATA_TYPES = {"DATETIME"}
 DATE_DATA_TYPES = {"DATE"}
-ANY_TYPE = ["null", "string", "number", "boolean", "object", "array"]
+KNOWN_DATA_TYPES = (
+    STRING_DATA_TYPES
+    | NUMBER_DATA_TYPES
+    | BOOLEAN_DATA_TYPES
+    | DATETIME_DATA_TYPES
+    | DATE_DATA_TYPES
+)
 
 
 class GainsightAPIError(Exception):
@@ -556,7 +563,34 @@ def json_schema_for(data_type: t.Optional[str]) -> dict:
         return {"type": ["null", "number"]}
     if kind in BOOLEAN_DATA_TYPES:
         return {"type": ["null", "boolean"]}
-    return {"type": list(ANY_TYPE)}
+    return text_schema()
+
+
+def text_schema() -> dict:
+    """Return the schema of a field sent as text: a nullable string.
+
+    A field of unknown type is text, never a list of JSON types. The Meltano
+    SDK turns every value of a field whose types include "boolean" into
+    `value != 0`, so "Active" arrives as True. Hotglue's parquet target then
+    makes a boolean column but writes str(value), and the sync fails.
+    """
+    return {"type": ["null", "string"]}
+
+
+def is_known_type(data_type: t.Optional[str]) -> bool:
+    """Return True for a Gainsight data type with a known JSON shape."""
+    return (data_type or "").upper() in KNOWN_DATA_TYPES
+
+
+def to_text(value: t.Any) -> t.Optional[str]:
+    """Return a text field's value as a string, or None.
+
+    Anything that is not a string is JSON-encoded, so a multi-select list
+    stays readable: ["a", "b"] becomes '["a", "b"]'.
+    """
+    if value is None or isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, default=str)
 
 
 def is_date_type(data_type: t.Optional[str]) -> bool:
@@ -1050,6 +1084,8 @@ class GainsightStream(RESTStream):
 
     # Fields whose epoch-millisecond values become ISO 8601 strings.
     date_fields: t.Set[str] = set()
+    # Fields whose values become text. See to_text.
+    text_fields: t.Set[str] = set()
 
     def __init__(self, *args: t.Any, **kwargs: t.Any) -> None:
         super().__init__(*args, **kwargs)
@@ -1217,7 +1253,29 @@ class GainsightStream(RESTStream):
         for field in self.date_fields:
             if field in row:
                 row[field] = to_iso_datetime(row[field])
+        for field in self.text_fields:
+            if field in row:
+                row[field] = to_text(row[field])
         return row
+
+    def log_unknown_types(self, unknown_types: t.Mapping[str, t.Any]) -> None:
+        """Log the Gainsight types this stream sends as text, with counts.
+
+        `unknown_types` maps a field name to its describe `dataType`.
+        """
+        if not unknown_types:
+            return
+        counts = collections.Counter(
+            str(kind or "no type").upper() for kind in unknown_types.values()
+        )
+        summary = ", ".join(f"{kind} ({count})" for kind, count in sorted(counts.items()))
+        self.logger.info(
+            "Stream %s sends %d fields as text because the tap does not map "
+            "their Gainsight types: %s.",
+            self.name,
+            len(unknown_types),
+            summary,
+        )
 
     def is_property_selected(self, name: str) -> bool:
         """Return True when the catalog selects a top-level property."""

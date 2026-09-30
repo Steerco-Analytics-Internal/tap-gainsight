@@ -391,8 +391,8 @@ def test_mda_nulls_missing_fields_dates_labels_and_lookups(api):
     assert got["1P02COMPANYNULL"]["Stage_label"] is None
     assert got["1P02COMPANYMISS"]["Stage_label"] is None
     assert "Name" not in got["1P02COMPANYMISS"]
-    assert got["1P02COMPANYMULT"]["Stage_label"] == ["Kicked Off", "Launched"]
-    assert got["1P02COMPANYSEMI"]["Stage_label"] == ["Kicked Off", None]
+    assert got["1P02COMPANYMULT"]["Stage_label"] == '["Kicked Off", "Launched"]'
+    assert got["1P02COMPANYSEMI"]["Stage_label"] == '["Kicked Off", null]'
     assert got["1P02COMPANYNODT"]["ModifiedDate"] is None
 
 
