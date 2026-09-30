@@ -115,5 +115,12 @@
     "source": "https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Data_Management_APIs/Data_Management_APIs",
     "section": "Get API - categoryID, Sample Failure Response",
     "verbatim": true
+  },
+  "describe_picklist_fields_live.json": {
+    "source": "https://support.gainsight.com/gainsight_nxt/API_and_Developer_Docs/Data_Management_APIs/Data_Management_APIs",
+    "section": "Post Describe OMD, recorded from a live tenant: fields CompanyType (PICKLIST), a MULTISELECTDROPDOWNLIST and Tags (no options)",
+    "verbatim": false,
+    "recorded": "2026-09-30",
+    "note": "The docs show no picklist field. Keys and nesting are as recorded. Ids, labels, categories and colors are replaced."
   }
 }

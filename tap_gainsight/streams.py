@@ -56,10 +56,21 @@ def _containers(field: dict) -> t.List[dict]:
 def picklist_items(field: dict) -> t.Optional[t.Dict[str, t.Any]]:
     """Return {item GSID: label} from a describe field, if it carries items.
 
-    The docs do not show a picklist field in a describe sample. This reads
-    any list under a key that contains "picklist", whose entries have a
-    `gsid`. That is the item shape of the documented dropdown API.
+    The docs do not show a picklist field in a describe sample. A live
+    describe lists the items under `options`, as {"value": <item GSID>,
+    "label": <name>}, inactive items included. Otherwise this reads any list
+    under a key that contains "picklist", whose entries have a `gsid`. That
+    is the item shape of the documented dropdown API.
     """
+    options = field.get("options")
+    if isinstance(options, list):
+        items = {
+            str(option["value"]): option.get("label")
+            for option in options
+            if isinstance(option, dict) and option.get("value")
+        }
+        if items:
+            return items
     for container in _containers(field):
         for key, value in container.items():
             if "picklist" not in key.lower() or not isinstance(value, list):
@@ -75,11 +86,15 @@ def picklist_items(field: dict) -> t.Optional[t.Dict[str, t.Any]]:
 
 
 def picklist_category_id(field: dict) -> t.Optional[str]:
-    """Return a dropdown `categoryId` from a describe field, if present."""
+    """Return a dropdown category id from a describe field, if present.
+
+    A live describe keeps it in `meta.properties.PICKLIST_CATEGORY_ID`.
+    """
     for container in _containers(field):
-        value = container.get("categoryId")
-        if isinstance(value, str) and value:
-            return value
+        for key in ("categoryId", "PICKLIST_CATEGORY_ID"):
+            value = container.get(key)
+            if isinstance(value, str) and value:
+                return value
     return None
 
 
