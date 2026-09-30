@@ -12,9 +12,11 @@ from tap_gainsight.client import (
     GainsightStream,
     SecondChainStream,
     is_date_type,
+    is_known_type,
     is_object_not_found,
     json_schema_for,
     parse_api_datetime,
+    text_schema,
     utc_now,
 )
 
@@ -32,8 +34,6 @@ LOOKUP_RELATED_FIELDS = {
     "gsuser": ("Name", "Email"),
     "company": ("Name",),
 }
-
-LABEL_SCHEMA = {"type": ["null", "string", "array"], "items": {"type": "string"}}
 
 
 def is_deleted_field(field: dict) -> bool:
@@ -122,6 +122,10 @@ class ObjectPlan:
         self.properties: t.Dict[str, dict] = {}
         self.fields: t.Dict[str, dict] = {}
         self.date_fields: t.Set[str] = set()
+        # Fields sent as text: unknown types and label columns.
+        self.text_fields: t.Set[str] = set()
+        # Field name -> describe dataType, for each type the tap doesn't map.
+        self.unknown_types: t.Dict[str, t.Any] = {}
         self.lookup_columns: t.List[str] = []
         # label column -> (id field, {item GSID: label})
         self.labels: t.Dict[str, t.Tuple[str, t.Mapping[str, t.Any]]] = {}
@@ -135,6 +139,9 @@ class ObjectPlan:
             self.properties[name] = json_schema_for(data_type)
             if is_date_type(data_type):
                 self.date_fields.add(name)
+            if not is_known_type(data_type):
+                self.text_fields.add(name)
+                self.unknown_types[name] = data_type
 
         for name, field in list(self.fields.items()):
             for column in lookup_columns(field, related_fields):
@@ -149,7 +156,9 @@ class ObjectPlan:
             if items:
                 label = f"{name}{LABEL_SUFFIX}"
                 if label not in self.properties:
-                    self.properties[label] = dict(LABEL_SCHEMA)
+                    # A multi-select label is a list, sent as JSON text.
+                    self.properties[label] = text_schema()
+                    self.text_fields.add(label)
                     self.labels[label] = (name, items)
 
     @property
@@ -206,9 +215,11 @@ class MDAObjectStream(SecondChainStream):
         self.object_name = object_name
         self.plan = plan
         self.date_fields = set(plan.date_fields)
+        self.text_fields = set(plan.text_fields)
         if replication_key_candidates is not None:
             self.replication_key_candidates = replication_key_candidates
         super().__init__(tap=tap, name=name or object_name, schema=plan.schema)
+        self.log_unknown_types(plan.unknown_types)
 
         has_gsid = "Gsid" in plan.fields
         self.primary_keys = ["Gsid"] if has_gsid else []
@@ -257,10 +268,10 @@ class MDAObjectStream(SecondChainStream):
     def post_process(
         self, row: dict, context: t.Optional[dict] = None
     ) -> t.Optional[dict]:
-        row = super().post_process(row, context) or row
+        # Labels read the raw ids, before an id field becomes text.
         for label, (id_field, items) in self.plan.labels.items():
             row[label] = resolve_label(row.get(id_field), items)
-        return row
+        return super().post_process(row, context) or row
 
 
 class DeletedRecordsStream(SecondChainStream):
@@ -578,18 +589,24 @@ class CtaStream(CtaSlicedStream):
         properties = dict(self.base_schema["properties"])
         self.select_map = dict(self.base_select)
         date_fields = set(type(self).date_fields)
+        unknown_types: t.Dict[str, t.Any] = {}
         for field in custom_fields or []:
             name = field.get("fieldName")
             if not name or name in properties or is_deleted_field(field):
                 continue
-            properties[name] = json_schema_for(field.get("dataType"))
+            data_type = field.get("dataType")
+            properties[name] = json_schema_for(data_type)
             self.select_map[name] = name
-            if is_date_type(field.get("dataType")):
+            if is_date_type(data_type):
                 date_fields.add(name)
+            if not is_known_type(data_type):
+                unknown_types[name] = data_type
         self.date_fields = date_fields
+        self.text_fields = set(unknown_types)
         super().__init__(
             tap=tap, schema={"type": "object", "properties": properties}
         )
+        self.log_unknown_types(unknown_types)
 
     def select_list(self) -> t.List[str]:
         select = [

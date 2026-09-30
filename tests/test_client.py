@@ -65,10 +65,10 @@ def test_normalize_domain_rejects_empty(value):
         ("PERCENTAGE", {"type": ["null", "number"]}),
         ("BOOLEAN", {"type": ["null", "boolean"]}),
         ("datetime", {"type": ["null", "string"], "format": "date-time"}),
-        ("PICKLIST", {"type": client.ANY_TYPE}),
-        ("MULTISELECTDROPDOWNLIST", {"type": client.ANY_TYPE}),
-        ("SOMETHING_NEW", {"type": client.ANY_TYPE}),
-        (None, {"type": client.ANY_TYPE}),
+        ("PICKLIST", {"type": ["null", "string"]}),
+        ("MULTISELECTDROPDOWNLIST", {"type": ["null", "string"]}),
+        ("SOMETHING_NEW", {"type": ["null", "string"]}),
+        (None, {"type": ["null", "string"]}),
     ],
 )
 def test_json_schema_for_every_documented_type(data_type, expected):
