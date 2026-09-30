@@ -39,7 +39,7 @@ def test_discovery_batches_describe_calls(api):
     assert first[0] == "company"
 
 
-def test_company_schema_has_every_field_custom_lookup_and_label(api):
+def test_company_schema_has_every_field_custom_lookup_and_picklist(api):
     company = streams_by_name(make_tap())["Company"]
     props = company.schema["properties"]
     assert company.primary_keys == ["Gsid"]
@@ -55,8 +55,10 @@ def test_company_schema_has_every_field_custom_lookup_and_label(api):
     assert props["Csm__gr.Name"] == {"type": ["null", "string"]}
     assert props["Csm__gr.Email"] == {"type": ["null", "string"]}
     assert props["CreatedBy__gr.Name"] == {"type": ["null", "string"]}
-    # Picklists get a label column next to the id.
-    assert "Stage_label" in props and "License_Type__gc_label" in props
+    # Picklist fields carry item names, as text, with no extra column.
+    assert props["Stage"] == {"type": ["null", "string"]}
+    assert props["License_Type__gc"] == {"type": ["null", "string"]}
+    assert not any(name.endswith("_label") for name in props)
     for schema in props.values():
         assert "null" in schema["type"]
 
@@ -75,18 +77,18 @@ def test_lookup_columns_need_the_target_field(api):
 
 def test_dropdown_api_is_called_for_category_only_picklists(api):
     stream = streams_by_name(make_tap())["Company"]
-    id_field, items = stream.plan.labels["License_Type__gc_label"]
-    assert id_field == "License_Type__gc"
+    items = stream.picklists["License_Type__gc"]
     assert items["1I00AABNSR5CLLWSP3F09ND6JHASXGUW8BW4"] == "External"
     dropdown_calls = [r for r in api.mocker.request_history if "/dropdowns/" in r.path]
     assert len(dropdown_calls) == 1
 
 
-def test_a_failing_dropdown_leaves_the_label_out(api):
+def test_a_failing_dropdown_leaves_that_field_without_names(api):
     api.dropdown = {"result": False, "errorDesc": "gone"}
     stream = streams_by_name(make_tap())["Company"]
-    assert "License_Type__gc_label" not in stream.schema["properties"]
-    assert "Stage_label" in stream.schema["properties"]
+    assert "License_Type__gc" not in stream.picklists
+    assert stream.schema["properties"]["License_Type__gc"] == {"type": ["null", "string"]}
+    assert "Stage" in stream.picklists
 
 
 def test_timeline_schema_comes_from_describe(api):

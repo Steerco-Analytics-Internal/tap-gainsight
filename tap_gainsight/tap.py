@@ -29,7 +29,6 @@ from tap_gainsight.streams import (
     CtaDeletedStream,
     CtaStream,
     DeletedRecordsStream,
-    LABEL_SUFFIX,
     MDAObjectStream,
     ObjectPlan,
     picklist_category_id,
@@ -322,7 +321,7 @@ class TapGainsight(Tap):
             ) from exc
         self.logger.warning("Dropping object %s. Describe failed: %s", name, exc)
 
-    def _dropdown_labels(
+    def _dropdown_names(
         self,
         client: GainsightMetadataClient,
         descriptions: t.Iterable[dict],
@@ -342,7 +341,7 @@ class TapGainsight(Tap):
                     raise
                 except GainsightAPIError as exc:
                     self.logger.warning(
-                        "No labels for dropdown category %s: %s", category, exc
+                        "No item names for dropdown category %s: %s", category, exc
                     )
                     self._failed_dropdowns = self._failed_dropdowns | {category}
                     dropdowns[category] = {}
@@ -412,7 +411,7 @@ class TapGainsight(Tap):
             for key in ("gsuser", "company")
             if key in described
         }
-        dropdowns = self._dropdown_labels(client, described.values())
+        dropdowns = self._dropdown_names(client, described.values())
 
         def plan_for(key: str) -> ObjectPlan:
             return ObjectPlan(
@@ -460,7 +459,7 @@ class TapGainsight(Tap):
             if isinstance(field, dict)
             and str(field.get("fieldName", "")).endswith("__gc")
         ]
-        streams.append(CtaStream(self, custom_fields=cta_custom))
+        streams.append(CtaStream(self, custom_fields=cta_custom, dropdowns=dropdowns))
         streams.append(CtaDeletedStream(self))
         streams.append(DeletedRecordsStream(self))
         self._check_input_catalog(streams)
@@ -472,9 +471,11 @@ class TapGainsight(Tap):
         Discovery runs again at sync time. When a selected stream or column
         is missing because a describe, dropdown or lookup-target call failed
         in this run, the run fails and names it, because the SDK would skip
-        it without a word. When it is missing because Gainsight no longer
-        has it, such as a field an admin deleted, the tap logs a warning and
-        syncs the rest.
+        it without a word. A selected dropdown field whose item names failed
+        to load fails the run too, rather than send item GSIDs in place of
+        names. When a column is missing because Gainsight no longer has it,
+        such as a field an admin deleted, the tap logs a warning and syncs
+        the rest.
         """
         catalog = self.input_catalog
         if not catalog:
@@ -494,9 +495,13 @@ class TapGainsight(Tap):
             schema = entry.schema.to_dict() if entry.schema else {}
             available = stream.schema.get("properties", {})
             for column in schema.get("properties", {}):
-                if not selection.get(("properties", column), False) or column in available:
+                if not selection.get(("properties", column), False):
                     continue
                 name = f"{stream_id}.{column}"
+                if column in available:
+                    if self._names_lost(stream, column):
+                        failed.append(name)
+                    continue
                 (failed if self._lost_to_failure(stream, column) else gone).append(name)
         if gone:
             self.logger.warning(
@@ -508,9 +513,9 @@ class TapGainsight(Tap):
             raise GainsightAPIError(
                 "The catalog selects "
                 + ", ".join(sorted(failed))
-                + ", but a metadata call failed in this run, so discovery could "
-                "not produce them. Check the warnings above for failed describe "
-                "or dropdown calls, and run the tap again."
+                + ", but a metadata call failed in this run, so the tap could not "
+                "build them as discovered. Check the warnings above for failed "
+                "describe or dropdown calls, and run the tap again."
             )
 
     def _lost_to_failure(self, stream: Stream, column: str) -> bool:
@@ -520,9 +525,6 @@ class TapGainsight(Tap):
         plan = getattr(stream, "plan", None)
         if plan is None:
             return False
-        if column.endswith(LABEL_SUFFIX):
-            field = plan.fields.get(column[: -len(LABEL_SUFFIX)])
-            return bool(field) and picklist_category_id(field) in self._failed_dropdowns
         if "__gr." in column:
             lookup = column.split(".", 1)[0]
             for field in plan.fields.values():
@@ -536,6 +538,18 @@ class TapGainsight(Tap):
                 }
                 return bool(targets & self._failed_objects)
         return False
+
+    def _names_lost(self, stream: Stream, column: str) -> bool:
+        """Return True when `column` is a dropdown field whose item names
+        failed to load in this run."""
+        plan = getattr(stream, "plan", None)
+        fields = plan.fields if plan is not None else getattr(stream, "custom_fields", {})
+        field = fields.get(column)
+        return (
+            bool(field)
+            and picklist_items(field) is None
+            and picklist_category_id(field) in self._failed_dropdowns
+        )
 
 
 if __name__ == "__main__":
